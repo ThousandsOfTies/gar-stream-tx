@@ -8,9 +8,9 @@ simulation-only control path:
   rotate in menu     -> select an item or change its value
 
 The menu contains Profile, Mirror, Rotate and Overlay.  Overlay controls the
-status/menu text composited into the outgoing video; a menu is always shown
-while it is being operated so it remains usable when the normal overlay is
-off.
+status/menu text on the TX's local ILI9341 monitor only.  The outgoing RTP
+program feed is always clean; a menu is always shown locally while it is
+being operated so it remains usable when the normal overlay is off.
 
 Pipeline shape (see README.md "Architecture"):
 
@@ -108,8 +108,6 @@ def _build_pipeline_string(config, with_preview):
         "! capsfilter name=out_caps "
         "! videoflip name=rotate_transform method=none "
         "! videoflip name=mirror_transform method=none "
-        "! textoverlay name=status_overlay text=\"\" valignment=top "
-        "halignment=left shaded-background=true "
         f"! jpegenc name=jpeg_encoder quality={config['jpeg_quality']} "
         "! rtpjpegpay name=rtp_pay "
         f"! udpsink host={config['rx_host']} port={config['rx_port']} sync=false"
@@ -158,7 +156,6 @@ class StreamTx:
         self.out_caps = None
         self.rotate_transform = None
         self.mirror_transform = None
-        self.status_overlay = None
         self.preview_rotate_transform = None
         self.preview_mirror_transform = None
         self.preview_status_overlay = None
@@ -170,7 +167,6 @@ class StreamTx:
         self.out_caps = self.pipeline.get_by_name("out_caps")
         self.rotate_transform = self.pipeline.get_by_name("rotate_transform")
         self.mirror_transform = self.pipeline.get_by_name("mirror_transform")
-        self.status_overlay = self.pipeline.get_by_name("status_overlay")
         camera_source = self.pipeline.get_by_name("camera_source")
         jpeg_encoder = self.pipeline.get_by_name("jpeg_encoder")
         payloader = self.pipeline.get_by_name("rtp_pay")
@@ -254,7 +250,6 @@ class StreamTx:
 
     def _refresh_status_overlay(self):
         text = self._status_text()
-        self.status_overlay.set_property("text", text)
         if self.preview_status_overlay is not None:
             self.preview_status_overlay.set_property("text", text)
 
