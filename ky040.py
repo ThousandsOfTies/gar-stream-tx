@@ -11,18 +11,24 @@ CLK/DT/SW, and periphery's sysfs-based GPIO API doesn't expose per-pin bias
 configuration. If the encoder is jittery, add 10k pull-up resistors to 3.3V
 on CLK/DT/SW (see README).
 """
+import os
 import threading
 import time
 
 from periphery import GPIO
 
 
+def _open_gpio(line, direction):
+    chip = os.environ.get("GAR_GPIO_CHIP")
+    return GPIO(chip, line, direction) if chip else GPIO(line, direction)
+
+
 class KY040:
     def __init__(self, clk_gpio, dt_gpio, sw_gpio,
                  on_rotate=None, on_press=None, bounce_ms=2, press_debounce_ms=30):
-        self.clk = GPIO(clk_gpio, "in")
-        self.dt = GPIO(dt_gpio, "in")
-        self.sw = GPIO(sw_gpio, "in")
+        self.clk = _open_gpio(clk_gpio, "in")
+        self.dt = _open_gpio(dt_gpio, "in")
+        self.sw = _open_gpio(sw_gpio, "in")
         self.clk.edge = "both"
         self.sw.edge = "falling"
 

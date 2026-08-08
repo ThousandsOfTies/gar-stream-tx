@@ -47,6 +47,8 @@ CONFIG = {
     "native_width": int(os.environ.get("GAR_CAMERA_WIDTH", "2048")),
     "native_height": int(os.environ.get("GAR_CAMERA_HEIGHT", "1536")),
     "native_fps": int(os.environ.get("GAR_CAMERA_FPS", "15")),
+    "camera_caps": os.environ.get("GAR_CAMERA_CAPS", "image/jpeg"),
+    "camera_io_mode": os.environ.get("GAR_CAMERA_IO_MODE", "auto"),
     "rx_host": os.environ.get("GAR_STREAM_RX_HOST"),
     "rx_port": int(os.environ.get("GAR_STREAM_RX_PORT", "5600")),
     "jpeg_quality": 85,
@@ -83,8 +85,8 @@ def _build_pipeline_string(config, with_preview):
         "t. ! queue max-size-buffers=2 leaky=downstream "
         "! videoscale ! videorate "
         "! capsfilter name=out_caps "
-        f"! jpegenc quality={config['jpeg_quality']} "
-        "! rtpjpegpay "
+        f"! jpegenc name=jpeg_encoder quality={config['jpeg_quality']} "
+        "! rtpjpegpay name=rtp_pay "
         f"! udpsink host={config['rx_host']} port={config['rx_port']} sync=false"
     )
     branches = [network_branch]
@@ -94,12 +96,14 @@ def _build_pipeline_string(config, with_preview):
             "! videoconvert ! videoscale "
             f"! video/x-raw,format=RGB16,width={PREVIEW_WIDTH},height={PREVIEW_HEIGHT} "
             "! appsink name=preview_sink emit-signals=true sync=false max-buffers=1 drop=true"
-        )
+    )
+    capture_caps = config["camera_caps"]
+    decoder = "! jpegdec " if capture_caps.startswith("image/jpeg") else ""
     return (
-        f"v4l2src device={config['camera_device']} "
-        f"! image/jpeg,width={config['native_width']},height={config['native_height']},"
+        f"v4l2src name=camera_source device={config['camera_device']} io-mode={config['camera_io_mode']} "
+        f"! {capture_caps},width={config['native_width']},height={config['native_height']},"
         f"framerate={config['native_fps']}/1 "
-        "! jpegdec ! tee name=t "
+        f"{decoder}! videoconvert ! tee name=t "
         + " ".join(branches)
     )
 
@@ -114,11 +118,33 @@ class StreamTx:
         self.size_index = size_index
         self.rate_index = rate_index
         self.display = display
+        self.restart_pending = False
+        self.sent_first_packet = False
+        self.captured_first_frame = False
+        self.encoded_first_frame = False
+        self.pipeline = None
+        self.out_caps = None
 
-        self.pipeline = Gst.parse_launch(_build_pipeline_string(config, display is not None))
+        self._create_pipeline()
+
+    def _create_pipeline(self):
+        self.pipeline = Gst.parse_launch(_build_pipeline_string(self.config, self.display is not None))
         self.out_caps = self.pipeline.get_by_name("out_caps")
+        camera_source = self.pipeline.get_by_name("camera_source")
+        jpeg_encoder = self.pipeline.get_by_name("jpeg_encoder")
+        payloader = self.pipeline.get_by_name("rtp_pay")
+        camera_source.get_static_pad("src").add_probe(
+            Gst.PadProbeType.BUFFER, self._on_camera_frame
+        )
+        jpeg_encoder.get_static_pad("src").add_probe(
+            Gst.PadProbeType.BUFFER, self._on_jpeg_frame
+        )
+        payloader.get_static_pad("src").add_probe(
+            Gst.PadProbeType.BUFFER | Gst.PadProbeType.BUFFER_LIST,
+            self._on_rtp_packet,
+        )
 
-        if display is not None:
+        if self.display is not None:
             sink = self.pipeline.get_by_name("preview_sink")
             sink.connect("new-sample", self._on_new_sample)
 
@@ -127,6 +153,24 @@ class StreamTx:
         bus.connect("message", self._on_bus_message)
 
         self._apply_output_caps()
+
+    def _on_camera_frame(self, _pad, _info):
+        if not self.captured_first_frame:
+            self.captured_first_frame = True
+            print(f"[stream_tx] first camera frame <- {self.config['camera_device']}")
+        return Gst.PadProbeReturn.OK
+
+    def _on_jpeg_frame(self, _pad, _info):
+        if not self.encoded_first_frame:
+            self.encoded_first_frame = True
+            print("[stream_tx] first JPEG frame encoded")
+        return Gst.PadProbeReturn.OK
+
+    def _on_rtp_packet(self, _pad, _info):
+        if not self.sent_first_packet:
+            self.sent_first_packet = True
+            print(f"[stream_tx] first RTP packet -> {self.config['rx_host']}:{self.config['rx_port']}")
+        return Gst.PadProbeReturn.OK
 
     def _apply_output_caps(self):
         width, height = SIZE_PRESETS[self.size_index]
@@ -152,11 +196,20 @@ class StreamTx:
     def _on_bus_message(self, bus, message):
         if message.type == Gst.MessageType.ERROR:
             err, debug = message.parse_error()
-            # Log and keep running rather than crashing the whole TX on a
-            # transient camera hiccup.
             print(f"[gst error] {err}: {debug}", file=sys.stderr)
+            if not self.restart_pending:
+                self.restart_pending = True
+                GLib.timeout_add_seconds(3, self._restart_pipeline)
         elif message.type == Gst.MessageType.EOS:
             print("[gst] end of stream", file=sys.stderr)
+
+    def _restart_pipeline(self):
+        self.pipeline.set_state(Gst.State.NULL)
+        self._create_pipeline()
+        self.pipeline.set_state(Gst.State.PLAYING)
+        self.restart_pending = False
+        print("[stream_tx] rebuilt camera pipeline")
+        return GLib.SOURCE_REMOVE
 
     def next_size(self, direction):
         self.size_index = (self.size_index + (1 if direction >= 0 else -1)) % len(SIZE_PRESETS)
