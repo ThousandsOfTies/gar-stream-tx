@@ -41,6 +41,12 @@ from gi.repository import Gst, GLib  # noqa: E402
 
 from ky040 import KY040  # noqa: E402
 
+
+def _optional_env_int(name):
+    value = os.environ.get(name)
+    return int(value) if value else None
+
+
 CONFIG = {
     "enc_clk_gpio": int(os.environ.get("GAR_ENC_CLK_GPIO", "17")),
     "enc_dt_gpio": int(os.environ.get("GAR_ENC_DT_GPIO", "27")),
@@ -63,12 +69,12 @@ CONFIG = {
     # Optional local preview: an ILI9341 wired directly to this Pi 5 over
     # SPI (same driver/wiring as gar-stream-rx). Leave False if you don't
     # have a panel attached to the TX board.
-    "local_display": False,
+    "local_display": os.environ.get("GAR_LOCAL_DISPLAY", "0") == "1",
     "spi_bus": 0,
     "spi_device": 0,
     "spi_max_hz": 24_000_000,
-    "dc_gpio": None,    # <- required if local_display is True
-    "rst_gpio": None,   # <- required if local_display is True
+    "dc_gpio": _optional_env_int("GAR_LCD_DC_GPIO"),
+    "rst_gpio": _optional_env_int("GAR_LCD_RST_GPIO"),
 }
 
 # 4:3 profiles keep the receiver's 320x240 ILI9341 free of letterboxing.
@@ -112,6 +118,10 @@ def _build_pipeline_string(config, with_preview):
     if with_preview:
         branches.append(
             "t. ! queue max-size-buffers=2 leaky=downstream "
+            "! videoflip name=preview_rotate_transform method=none "
+            "! videoflip name=preview_mirror_transform method=none "
+            "! textoverlay name=preview_status_overlay text=\"\" valignment=top "
+            "halignment=left shaded-background=true "
             "! videoconvert ! videoscale "
             f"! video/x-raw,format=RGB16,width={PREVIEW_WIDTH},height={PREVIEW_HEIGHT} "
             "! appsink name=preview_sink emit-signals=true sync=false max-buffers=1 drop=true"
@@ -149,6 +159,9 @@ class StreamTx:
         self.rotate_transform = None
         self.mirror_transform = None
         self.status_overlay = None
+        self.preview_rotate_transform = None
+        self.preview_mirror_transform = None
+        self.preview_status_overlay = None
 
         self._create_pipeline()
 
@@ -173,6 +186,9 @@ class StreamTx:
         )
 
         if self.display is not None:
+            self.preview_rotate_transform = self.pipeline.get_by_name("preview_rotate_transform")
+            self.preview_mirror_transform = self.pipeline.get_by_name("preview_mirror_transform")
+            self.preview_status_overlay = self.pipeline.get_by_name("preview_status_overlay")
             sink = self.pipeline.get_by_name("preview_sink")
             sink.connect("new-sample", self._on_new_sample)
 
@@ -237,7 +253,10 @@ class StreamTx:
                 f"Mirror {mirror} · Rotate {rotation}\nSending")
 
     def _refresh_status_overlay(self):
-        self.status_overlay.set_property("text", self._status_text())
+        text = self._status_text()
+        self.status_overlay.set_property("text", text)
+        if self.preview_status_overlay is not None:
+            self.preview_status_overlay.set_property("text", text)
 
     def _apply_video_options(self):
         self._apply_output_caps()
@@ -245,6 +264,11 @@ class StreamTx:
             "method", ROTATION_METHODS[self.rotation_index][1])
         self.mirror_transform.set_property(
             "method", "horizontal-flip" if self.mirror else "none")
+        if self.preview_rotate_transform is not None:
+            self.preview_rotate_transform.set_property(
+                "method", ROTATION_METHODS[self.rotation_index][1])
+            self.preview_mirror_transform.set_property(
+                "method", "horizontal-flip" if self.mirror else "none")
         self._refresh_status_overlay()
 
     def _on_new_sample(self, sink):

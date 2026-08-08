@@ -8,11 +8,17 @@ through sysfs GPIO (periphery.GPIO).
 Only a write-only subset is implemented (enough to blit RGB565 frames),
 since that's all a live-preview appsink callback needs.
 """
+import os
 import sys
 import time
 
 import spidev
 from periphery import GPIO
+
+
+def _open_gpio(line, direction):
+    chip = os.environ.get("GAR_GPIO_CHIP")
+    return GPIO(chip, line, direction) if chip else GPIO(line, direction)
 
 # ILI9341 command set (subset)
 _SWRESET = 0x01
@@ -73,8 +79,8 @@ class ILI9341:
             madctl |= 0x08
         self._madctl = madctl
 
-        self.dc = GPIO(dc_gpio, "out")
-        self.rst = GPIO(rst_gpio, "out")
+        self.dc = _open_gpio(dc_gpio, "out")
+        self.rst = _open_gpio(rst_gpio, "out")
 
         self.spi = spidev.SpiDev()
         self.spi.open(spi_bus, spi_device)
