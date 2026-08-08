@@ -259,6 +259,9 @@ class StreamTx:
     def _refresh_status_overlay(self):
         text = self._status_text()
         if self.preview_status_overlay is not None:
+            # Keep normal status unobtrusive, but make menu text readable on
+            # any camera image. RX follows the same menu-background rule.
+            self.preview_status_overlay.set_property("shaded-background", self.menu_open)
             self.preview_status_overlay.set_property("text", text)
 
     def _apply_video_options(self):
