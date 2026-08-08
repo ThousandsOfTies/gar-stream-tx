@@ -43,7 +43,9 @@ class KY040:
         self.clk = _open_gpio(clk_gpio, "in")
         self.dt = _open_gpio(dt_gpio, "in")
         self.sw = _open_gpio(sw_gpio, "in")
-        self.clk.edge = "both"
+        # One detent produces a rising and a falling CLK edge.  Handling only
+        # the falling edge makes one physical detent exactly one UI step.
+        self.clk.edge = "falling"
         self.sw.edge = "falling"
 
         self.on_rotate = on_rotate
@@ -73,17 +75,13 @@ class KY040:
         self.sw.close()
 
     def _rotate_loop(self):
-        last_clk = self.clk.read()
         last_time = 0.0
         while self._running:
             if not self.clk.poll(0.5):
                 continue
             event_level = _read_edge(self.clk)
             clk_state = self.clk.read() if event_level is None else event_level
-            if clk_state == last_clk:
-                continue
             now = time.monotonic()
-            last_clk = clk_state
             if now - last_time < self.bounce_s:
                 continue
             last_time = now
