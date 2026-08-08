@@ -89,6 +89,7 @@ DEFAULT_PROFILE_INDEX = 1
 FIXED_FPS = 15
 
 MENU_ITEMS = ("Profile", "Mirror", "Rotate", "Overlay")
+MAIN_MENU_ITEMS = (*MENU_ITEMS, "EXIT")
 ROTATION_METHODS = (
     ("0°", "none"),
     ("90°", "clockwise"),
@@ -145,8 +146,8 @@ class StreamTx:
         self.rotation_index = 0
         self.overlay_enabled = True
         self.menu_open = False
-        self.menu_editing = False
         self.menu_index = 0
+        self.submenu_index = None
         self.display = display
         self.restart_pending = False
         self.sent_first_packet = False
@@ -228,8 +229,15 @@ class StreamTx:
         mirror = "ON" if self.mirror else "OFF"
         rotation = ROTATION_METHODS[self.rotation_index][0]
         if self.menu_open:
+            if self.submenu_index is not None:
+                item = MENU_ITEMS[self.menu_index]
+                rows = [f"TX MENU > {item.upper()}"]
+                for index, value in enumerate(self._submenu_values()):
+                    marker = ">" if index == self.submenu_index else " "
+                    rows.append(f"{marker} {value}")
+                return "\n".join(rows)
             rows = ["TX MENU"]
-            for index, item in enumerate(MENU_ITEMS):
+            for index, item in enumerate(MAIN_MENU_ITEMS):
                 marker = ">" if index == self.menu_index else " "
                 if item == "Profile":
                     value = profile
@@ -237,11 +245,11 @@ class StreamTx:
                     value = mirror
                 elif item == "Rotate":
                     value = rotation
-                else:
+                elif item == "Overlay":
                     value = "ON" if self.overlay_enabled else "OFF"
-                rows.append(f"{marker} {item}: {value}")
-            rows.append("Rotate: change" if self.menu_editing else "Rotate: select")
-            rows.append("Press: apply" if self.menu_editing else "Press: edit")
+                else:
+                    value = ""
+                rows.append(f"{marker} {item}{': ' + value if value else ''}")
             return "\n".join(rows)
         if not self.overlay_enabled:
             return ""
@@ -299,32 +307,59 @@ class StreamTx:
         print("[stream_tx] rebuilt camera pipeline")
         return GLib.SOURCE_REMOVE
 
+    def _submenu_values(self):
+        if self.menu_index == 0:
+            return tuple(profile[0] for profile in PROFILES)
+        if self.menu_index == 1:
+            return ("OFF", "ON")
+        if self.menu_index == 2:
+            return tuple(rotation[0] for rotation in ROTATION_METHODS)
+        return ("OFF", "ON")
+
+    def _current_submenu_index(self):
+        if self.menu_index == 0:
+            return self.profile_index
+        if self.menu_index == 1:
+            return int(self.mirror)
+        if self.menu_index == 2:
+            return self.rotation_index
+        return int(self.overlay_enabled)
+
+    def _apply_submenu_value(self):
+        if self.menu_index == 0:
+            self.profile_index = self.submenu_index
+        elif self.menu_index == 1:
+            self.mirror = bool(self.submenu_index)
+        elif self.menu_index == 2:
+            self.rotation_index = self.submenu_index
+        else:
+            self.overlay_enabled = bool(self.submenu_index)
+        self._apply_video_options()
+
     def rotate_control(self, direction):
         """Handle a physical encoder turn using the menu's current state."""
         if not self.menu_open:
             return
         step = 1 if direction >= 0 else -1
-        if not self.menu_editing:
-            self.menu_index = (self.menu_index + step) % len(MENU_ITEMS)
-        elif self.menu_index == 0:
-            self.profile_index = (self.profile_index + step) % len(PROFILES)
-        elif self.menu_index == 1:
-            self.mirror = not self.mirror
-        elif self.menu_index == 2:
-            self.rotation_index = (self.rotation_index + step) % len(ROTATION_METHODS)
+        if self.submenu_index is None:
+            self.menu_index = (self.menu_index + step) % len(MAIN_MENU_ITEMS)
         else:
-            self.overlay_enabled = not self.overlay_enabled
-        self._apply_video_options()
+            self.submenu_index = (
+                self.submenu_index + step) % len(self._submenu_values())
+        self._refresh_status_overlay()
 
     def press_control(self):
-        """Open the menu, enter an item, then confirm and hide the menu."""
+        """Open the menu, select an item, then confirm its submenu value."""
         if not self.menu_open:
             self.menu_open = True
-        elif not self.menu_editing:
-            self.menu_editing = True
-        else:
-            self.menu_editing = False
+            self.menu_index = 0
+        elif self.submenu_index is None and self.menu_index == len(MENU_ITEMS):
             self.menu_open = False
+        elif self.submenu_index is None:
+            self.submenu_index = self._current_submenu_index()
+        else:
+            self._apply_submenu_value()
+            self.submenu_index = None
         self._refresh_status_overlay()
 
     def start(self):
