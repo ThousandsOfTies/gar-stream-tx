@@ -8,6 +8,7 @@ through sysfs GPIO (periphery.GPIO).
 Only a write-only subset is implemented (enough to blit RGB565 frames),
 since that's all a live-preview appsink callback needs.
 """
+import sys
 import time
 
 import spidev
@@ -148,3 +149,13 @@ class ILI9341:
         self._set_window(x, y, x + w - 1, y + h - 1)
         self.dc.write(True)
         self._write_raw(pixel_buf)
+
+    def blit_native_rgb565(self, x, y, w, h, pixel_buf):
+        """Draw host-native RGB565, converting it to the panel's MSB-first order."""
+        if sys.byteorder == "little":
+            pixels = bytearray(pixel_buf)
+            high_bytes = pixels[1::2]
+            pixels[1::2] = pixels[0::2]
+            pixels[0::2] = high_bytes
+            pixel_buf = pixels
+        self.blit(x, y, w, h, pixel_buf)

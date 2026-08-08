@@ -188,7 +188,9 @@ class StreamTx:
         ok, mapinfo = buf.map(Gst.MapFlags.READ)
         if ok:
             try:
-                self.display.blit(0, 0, PREVIEW_WIDTH, PREVIEW_HEIGHT, bytes(mapinfo.data))
+                self.display.blit_native_rgb565(
+                    0, 0, PREVIEW_WIDTH, PREVIEW_HEIGHT, mapinfo.data
+                )
             finally:
                 buf.unmap(mapinfo)
         return Gst.FlowReturn.OK
