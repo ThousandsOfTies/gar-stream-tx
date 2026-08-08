@@ -24,6 +24,7 @@ Requires PyGObject + the GStreamer 1.0 typelib (system packages, not pip -
 see README.md "Dependencies"). Uses the same ili9341.py/ky040.py as
 gar-stream-rx.
 """
+import os
 import sys
 
 import gi
@@ -34,20 +35,20 @@ from gi.repository import Gst, GLib  # noqa: E402
 from ky040 import KY040  # noqa: E402
 
 CONFIG = {
-    "enc_clk_gpio": 17,
-    "enc_dt_gpio": 27,
-    "enc_sw_gpio": 22,
-    "camera_device": "/dev/video0",
+    "enc_clk_gpio": int(os.environ.get("GAR_ENC_CLK_GPIO", "17")),
+    "enc_dt_gpio": int(os.environ.get("GAR_ENC_DT_GPIO", "27")),
+    "enc_sw_gpio": int(os.environ.get("GAR_ENC_SW_GPIO", "22")),
+    "camera_device": os.environ.get("GAR_CAMERA_DEVICE", "/dev/video0"),
     # Native capture mode - the OV3660 module's max (2048x1536/15fps MJPEG).
     # We always capture at this mode and downscale/downsample in software,
     # rather than asking v4l2src for the target size/rate directly, since we
     # can't be sure every SIZE_PRESETS entry is an actual discrete UVC mode
     # this camera advertises (see README's "SIZE/RATE presets" section).
-    "native_width": 2048,
-    "native_height": 1536,
-    "native_fps": 15,
-    "rx_host": None,   # <- fill in gar-stream-rx's (Lyra Plus) IP address
-    "rx_port": 5600,
+    "native_width": int(os.environ.get("GAR_CAMERA_WIDTH", "2048")),
+    "native_height": int(os.environ.get("GAR_CAMERA_HEIGHT", "1536")),
+    "native_fps": int(os.environ.get("GAR_CAMERA_FPS", "15")),
+    "rx_host": os.environ.get("GAR_STREAM_RX_HOST"),
+    "rx_port": int(os.environ.get("GAR_STREAM_RX_PORT", "5600")),
     "jpeg_quality": 85,
 
     # Optional local preview: an ILI9341 wired directly to this Pi 5 over
@@ -221,4 +222,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
