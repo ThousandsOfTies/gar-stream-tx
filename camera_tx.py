@@ -1,9 +1,16 @@
-"""gar-stream-tx: OV3660 USB UVC camera -> MJPEG/RTP/UDP, with an optional
-local ILI9341 preview and KY-040 control of the network output's size and
-framerate.
+"""gar-stream-tx: OV3660 USB UVC camera -> MJPEG/RTP/UDP.
 
-  rotate -> cycle through SIZE_PRESETS  (resolution sent to the RX side)
-  press  -> cycle through RATE_PRESETS  (framerate sent to the RX side)
+The KY-040 controls the same on-screen menu on a physical TX device and in
+the GAR panel.  It configures the outgoing stream rather than introducing a
+simulation-only control path:
+
+  press             -> open a menu / enter or confirm an item
+  rotate in menu     -> select an item or change its value
+
+The menu contains Profile, Mirror, Rotate and Overlay.  Overlay controls the
+status/menu text composited into the outgoing video; a menu is always shown
+while it is being operated so it remains usable when the normal overlay is
+off.
 
 Pipeline shape (see README.md "Architecture"):
 
@@ -64,16 +71,24 @@ CONFIG = {
     "rst_gpio": None,   # <- required if local_display is True
 }
 
-# 4:3 presets - gar-stream-rx's ILI9341 panel is 320x240 (4:3), so keeping
-# these 4:3 avoids letterboxing on the RX side. Index 1 (640x480, exactly 2x
-# the panel resolution) is the recommended default - see
-# gar-stream-rx/README.md's "SPI bandwidth note".
-SIZE_PRESETS = [(320, 240), (640, 480), (1024, 768), (2048, 1536)]
-DEFAULT_SIZE_INDEX = 1
+# 4:3 profiles keep the receiver's 320x240 ILI9341 free of letterboxing.
+# All profiles intentionally use the camera's stable 15fps maximum.
+PROFILES = (
+    ("Low latency", 320, 240),
+    ("Standard", 640, 480),
+    ("High quality", 1024, 768),
+    ("Maximum", 2048, 1536),
+)
+DEFAULT_PROFILE_INDEX = 1
+FIXED_FPS = 15
 
-# Capped at the camera's native 15fps max.
-RATE_PRESETS = [5, 10, 15]
-DEFAULT_RATE_INDEX = 2
+MENU_ITEMS = ("Profile", "Mirror", "Rotate", "Overlay")
+ROTATION_METHODS = (
+    ("0°", "none"),
+    ("90°", "clockwise"),
+    ("180°", "rotate-180"),
+    ("270°", "counterclockwise"),
+)
 
 # The local preview always renders at the panel's native size, independent
 # of the SIZE_PRESETS chosen for the network branch.
@@ -85,6 +100,10 @@ def _build_pipeline_string(config, with_preview):
         "t. ! queue max-size-buffers=2 leaky=downstream "
         "! videoscale ! videorate "
         "! capsfilter name=out_caps "
+        "! videoflip name=rotate_transform method=none "
+        "! videoflip name=mirror_transform method=none "
+        "! textoverlay name=status_overlay text=\"\" valignment=top "
+        "halignment=left shaded-background=true "
         f"! jpegenc name=jpeg_encoder quality={config['jpeg_quality']} "
         "! rtpjpegpay name=rtp_pay "
         f"! udpsink host={config['rx_host']} port={config['rx_port']} sync=false"
@@ -109,14 +128,17 @@ def _build_pipeline_string(config, with_preview):
 
 
 class StreamTx:
-    """Owns the GStreamer pipeline; size/rate changes are live caps changes
-    on the network branch's capsfilter, not a pipeline restart."""
+    """Owns the GStreamer pipeline and the TX's physical-control menu."""
 
-    def __init__(self, config, size_index=DEFAULT_SIZE_INDEX, rate_index=DEFAULT_RATE_INDEX,
-                 display=None):
+    def __init__(self, config, profile_index=DEFAULT_PROFILE_INDEX, display=None):
         self.config = config
-        self.size_index = size_index
-        self.rate_index = rate_index
+        self.profile_index = profile_index
+        self.mirror = False
+        self.rotation_index = 0
+        self.overlay_enabled = True
+        self.menu_open = False
+        self.menu_editing = False
+        self.menu_index = 0
         self.display = display
         self.restart_pending = False
         self.sent_first_packet = False
@@ -124,12 +146,18 @@ class StreamTx:
         self.encoded_first_frame = False
         self.pipeline = None
         self.out_caps = None
+        self.rotate_transform = None
+        self.mirror_transform = None
+        self.status_overlay = None
 
         self._create_pipeline()
 
     def _create_pipeline(self):
         self.pipeline = Gst.parse_launch(_build_pipeline_string(self.config, self.display is not None))
         self.out_caps = self.pipeline.get_by_name("out_caps")
+        self.rotate_transform = self.pipeline.get_by_name("rotate_transform")
+        self.mirror_transform = self.pipeline.get_by_name("mirror_transform")
+        self.status_overlay = self.pipeline.get_by_name("status_overlay")
         camera_source = self.pipeline.get_by_name("camera_source")
         jpeg_encoder = self.pipeline.get_by_name("jpeg_encoder")
         payloader = self.pipeline.get_by_name("rtp_pay")
@@ -152,7 +180,7 @@ class StreamTx:
         bus.add_signal_watch()
         bus.connect("message", self._on_bus_message)
 
-        self._apply_output_caps()
+        self._apply_video_options()
 
     def _on_camera_frame(self, _pad, _info):
         if not self.captured_first_frame:
@@ -172,13 +200,52 @@ class StreamTx:
             print(f"[stream_tx] first RTP packet -> {self.config['rx_host']}:{self.config['rx_port']}")
         return Gst.PadProbeReturn.OK
 
+    def _profile(self):
+        return PROFILES[self.profile_index]
+
     def _apply_output_caps(self):
-        width, height = SIZE_PRESETS[self.size_index]
-        fps = RATE_PRESETS[self.rate_index]
+        _name, width, height = self._profile()
         self.out_caps.set_property(
-            "caps", Gst.Caps.from_string(f"video/x-raw,width={width},height={height},framerate={fps}/1"))
-        print(f"[stream_tx] output now {width}x{height}@{fps}fps -> "
+            "caps", Gst.Caps.from_string(
+                f"video/x-raw,width={width},height={height},framerate={FIXED_FPS}/1"))
+        print(f"[stream_tx] profile {self._profile()[0]}: {width}x{height}@{FIXED_FPS}fps -> "
               f"{self.config['rx_host']}:{self.config['rx_port']}")
+
+    def _status_text(self):
+        profile, width, height = self._profile()
+        mirror = "ON" if self.mirror else "OFF"
+        rotation = ROTATION_METHODS[self.rotation_index][0]
+        if self.menu_open:
+            rows = ["TX MENU"]
+            for index, item in enumerate(MENU_ITEMS):
+                marker = ">" if index == self.menu_index else " "
+                if item == "Profile":
+                    value = profile
+                elif item == "Mirror":
+                    value = mirror
+                elif item == "Rotate":
+                    value = rotation
+                else:
+                    value = "ON" if self.overlay_enabled else "OFF"
+                rows.append(f"{marker} {item}: {value}")
+            rows.append("Rotate: change" if self.menu_editing else "Rotate: select")
+            rows.append("Press: apply" if self.menu_editing else "Press: edit")
+            return "\n".join(rows)
+        if not self.overlay_enabled:
+            return ""
+        return (f"TX · {profile}\n{width}x{height} · {FIXED_FPS} fps · "
+                f"Mirror {mirror} · Rotate {rotation}\nSending")
+
+    def _refresh_status_overlay(self):
+        self.status_overlay.set_property("text", self._status_text())
+
+    def _apply_video_options(self):
+        self._apply_output_caps()
+        self.rotate_transform.set_property(
+            "method", ROTATION_METHODS[self.rotation_index][1])
+        self.mirror_transform.set_property(
+            "method", "horizontal-flip" if self.mirror else "none")
+        self._refresh_status_overlay()
 
     def _on_new_sample(self, sink):
         sample = sink.emit("pull-sample")
@@ -213,13 +280,33 @@ class StreamTx:
         print("[stream_tx] rebuilt camera pipeline")
         return GLib.SOURCE_REMOVE
 
-    def next_size(self, direction):
-        self.size_index = (self.size_index + (1 if direction >= 0 else -1)) % len(SIZE_PRESETS)
-        self._apply_output_caps()
+    def rotate_control(self, direction):
+        """Handle a physical encoder turn using the menu's current state."""
+        if not self.menu_open:
+            return
+        step = 1 if direction >= 0 else -1
+        if not self.menu_editing:
+            self.menu_index = (self.menu_index + step) % len(MENU_ITEMS)
+        elif self.menu_index == 0:
+            self.profile_index = (self.profile_index + step) % len(PROFILES)
+        elif self.menu_index == 1:
+            self.mirror = not self.mirror
+        elif self.menu_index == 2:
+            self.rotation_index = (self.rotation_index + step) % len(ROTATION_METHODS)
+        else:
+            self.overlay_enabled = not self.overlay_enabled
+        self._apply_video_options()
 
-    def next_rate(self):
-        self.rate_index = (self.rate_index + 1) % len(RATE_PRESETS)
-        self._apply_output_caps()
+    def press_control(self):
+        """Open the menu, enter an item, then confirm and hide the menu."""
+        if not self.menu_open:
+            self.menu_open = True
+        elif not self.menu_editing:
+            self.menu_editing = True
+        else:
+            self.menu_editing = False
+            self.menu_open = False
+        self._refresh_status_overlay()
 
     def start(self):
         self.pipeline.set_state(Gst.State.PLAYING)
@@ -257,13 +344,13 @@ def main():
 
     encoder = KY040(
         CONFIG["enc_clk_gpio"], CONFIG["enc_dt_gpio"], CONFIG["enc_sw_gpio"],
-        on_rotate=lambda direction, counter: tx.next_size(direction),
-        on_press=lambda: tx.next_rate(),
+        on_rotate=lambda direction, counter: tx.rotate_control(direction),
+        on_press=tx.press_control,
     )
     encoder.start()
 
     loop = GLib.MainLoop()
-    print("Running. Rotate KY-040 to change size, press to change rate. Ctrl+C to quit.")
+    print("Running. Press KY-040 for TX menu; rotate to select/change. Ctrl+C to quit.")
     try:
         loop.run()
     except KeyboardInterrupt:
