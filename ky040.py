@@ -23,6 +23,20 @@ def _open_gpio(line, direction):
     return GPIO(chip, line, direction) if chip else GPIO(line, direction)
 
 
+def _read_edge(gpio):
+    """Consume a pending GPIO event and return its level when available.
+
+    python-periphery's character-device backend requires ``read_event()``
+    after ``poll()``.  The legacy sysfs backend has no such method, and its
+    normal ``read()`` both obtains the level and clears the pending event.
+    """
+    try:
+        event = gpio.read_event()
+    except NotImplementedError:
+        return None
+    return event.edge == "rising"
+
+
 class KY040:
     def __init__(self, clk_gpio, dt_gpio, sw_gpio,
                  on_rotate=None, on_press=None, bounce_ms=2, press_debounce_ms=30):
@@ -64,7 +78,8 @@ class KY040:
         while self._running:
             if not self.clk.poll(0.5):
                 continue
-            clk_state = self.clk.read()
+            event_level = _read_edge(self.clk)
+            clk_state = self.clk.read() if event_level is None else event_level
             if clk_state == last_clk:
                 continue
             now = time.monotonic()
@@ -83,6 +98,8 @@ class KY040:
         while self._running:
             if not self.sw.poll(0.5):
                 continue
+            if _read_edge(self.sw) is None:
+                self.sw.read()
             now = time.monotonic()
             if now - last_time < self.press_debounce_s:
                 continue
