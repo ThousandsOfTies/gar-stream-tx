@@ -12,11 +12,14 @@ status/menu text on the TX's local ILI9341 monitor only.  The outgoing RTP
 program feed is always clean; a menu is always shown locally while it is
 being operated so it remains usable when the normal overlay is off.
 
+The TX advertises itself as a Source. It has no configured RX address;
+renewable requests from RX devices supply the RTP destinations at runtime.
+
 Pipeline shape (see README.md "Architecture"):
 
-    v4l2src (native 2048x1536@15fps) -> jpegdec -> tee
+    v4l2src (configured native MJPEG mode) -> jpegdec -> tee
       branch A: videoscale/videorate -> capsfilter(out_caps) -> jpegenc
-                -> rtpjpegpay -> udpsink  (to gar-stream-rx)
+                -> rtpjpegpay -> multiudpsink  (requested receivers only)
       branch B (only if local_display is on): videoconvert/videoscale
                 -> RGB565 -> appsink -> ILI9341 over SPI
 
@@ -32,6 +35,7 @@ see README.md "Dependencies"). Uses the same ili9341.py/ky040.py as
 gar-stream-rx.
 """
 import os
+import socket
 import sys
 
 import gi
@@ -40,6 +44,10 @@ gi.require_version("Gst", "1.0")
 from gi.repository import Gst, GLib  # noqa: E402
 
 from ky040 import KY040  # noqa: E402
+from source_advertiser import (  # noqa: E402
+    DEFAULT_DISCOVERY_PORT,
+    SourceAdvertiser,
+)
 
 
 def _optional_env_int(name):
@@ -52,18 +60,20 @@ CONFIG = {
     "enc_dt_gpio": int(os.environ.get("GAR_ENC_DT_GPIO", "27")),
     "enc_sw_gpio": int(os.environ.get("GAR_ENC_SW_GPIO", "22")),
     "camera_device": os.environ.get("GAR_CAMERA_DEVICE", "/dev/video0"),
-    # Native capture mode - the OV3660 module's max (2048x1536/15fps MJPEG).
+    # Native capture mode. The current Pi camera advertises
+    # 2048x1536/30fps MJPEG; override these values for another UVC device.
     # We always capture at this mode and downscale/downsample in software,
     # rather than asking v4l2src for the target size/rate directly, since we
     # can't be sure every SIZE_PRESETS entry is an actual discrete UVC mode
     # this camera advertises (see README's "SIZE/RATE presets" section).
     "native_width": int(os.environ.get("GAR_CAMERA_WIDTH", "2048")),
     "native_height": int(os.environ.get("GAR_CAMERA_HEIGHT", "1536")),
-    "native_fps": int(os.environ.get("GAR_CAMERA_FPS", "15")),
+    "native_fps": int(os.environ.get("GAR_CAMERA_FPS", "30")),
     "camera_caps": os.environ.get("GAR_CAMERA_CAPS", "image/jpeg"),
     "camera_io_mode": os.environ.get("GAR_CAMERA_IO_MODE", "auto"),
-    "rx_host": os.environ.get("GAR_STREAM_RX_HOST"),
-    "rx_port": int(os.environ.get("GAR_STREAM_RX_PORT", "5600")),
+    "source_id": os.environ.get("GAR_STREAM_SOURCE_ID", f"{socket.gethostname()}-tx"),
+    "source_name": os.environ.get("GAR_STREAM_SOURCE_NAME", socket.gethostname()),
+    "discovery_port": int(os.environ.get("GAR_STREAM_DISCOVERY_PORT", str(DEFAULT_DISCOVERY_PORT))),
     "jpeg_quality": 85,
 
     # Optional local preview: an ILI9341 wired directly to this Pi 5 over
@@ -78,7 +88,8 @@ CONFIG = {
 }
 
 # 4:3 profiles keep the receiver's 320x240 ILI9341 free of letterboxing.
-# All profiles intentionally use the camera's stable 15fps maximum.
+# All outgoing profiles intentionally use a stable 15fps after videorate,
+# independently of the camera capture frame rate.
 PROFILES = (
     ("Low latency", 320, 240),
     ("Standard", 640, 480),
@@ -111,7 +122,7 @@ def _build_pipeline_string(config, with_preview):
         "! videoflip name=mirror_transform method=none "
         f"! jpegenc name=jpeg_encoder quality={config['jpeg_quality']} "
         "! rtpjpegpay name=rtp_pay "
-        f"! udpsink host={config['rx_host']} port={config['rx_port']} sync=false"
+        "! multiudpsink name=stream_sink sync=false async=false"
     )
     branches = [network_branch]
     if with_preview:
@@ -151,6 +162,7 @@ class StreamTx:
         self.display = display
         self.restart_pending = False
         self.sent_first_packet = False
+        self.stream_clients = ()
         self.captured_first_frame = False
         self.encoded_first_frame = False
         self.pipeline = None
@@ -171,6 +183,7 @@ class StreamTx:
         camera_source = self.pipeline.get_by_name("camera_source")
         jpeg_encoder = self.pipeline.get_by_name("jpeg_encoder")
         payloader = self.pipeline.get_by_name("rtp_pay")
+        self.stream_sink = self.pipeline.get_by_name("stream_sink")
         camera_source.get_static_pad("src").add_probe(
             Gst.PadProbeType.BUFFER, self._on_camera_frame
         )
@@ -194,6 +207,7 @@ class StreamTx:
         bus.connect("message", self._on_bus_message)
 
         self._apply_video_options()
+        self._apply_stream_clients()
 
     def _on_camera_frame(self, _pad, _info):
         if not self.captured_first_frame:
@@ -210,7 +224,7 @@ class StreamTx:
     def _on_rtp_packet(self, _pad, _info):
         if not self.sent_first_packet:
             self.sent_first_packet = True
-            print(f"[stream_tx] first RTP packet -> {self.config['rx_host']}:{self.config['rx_port']}")
+            print("[stream_tx] first RTP packet ready")
         return Gst.PadProbeReturn.OK
 
     def _profile(self):
@@ -221,8 +235,24 @@ class StreamTx:
         self.out_caps.set_property(
             "caps", Gst.Caps.from_string(
                 f"video/x-raw,width={width},height={height},framerate={FIXED_FPS}/1"))
-        print(f"[stream_tx] profile {self._profile()[0]}: {width}x{height}@{FIXED_FPS}fps -> "
-              f"{self.config['rx_host']}:{self.config['rx_port']}")
+        print(f"[stream_tx] profile {self._profile()[0]}: {width}x{height}@{FIXED_FPS}fps")
+
+    def _apply_stream_clients(self):
+        clients = ",".join(f"{client.host}:{client.port}" for client in self.stream_clients)
+        self.stream_sink.set_property("clients", clients)
+
+    def set_stream_clients(self, clients):
+        """Apply receiver leases on the GLib/GStreamer thread."""
+        clients = tuple(clients)
+        if clients == self.stream_clients:
+            return GLib.SOURCE_REMOVE
+        self.stream_clients = clients
+        self.sent_first_packet = False
+        self._apply_stream_clients()
+        destinations = ", ".join(f"{client.receiver_id}@{client.host}:{client.port}" for client in clients)
+        print(f"[stream_tx] receivers: {destinations or 'none'}")
+        self._refresh_status_overlay()
+        return GLib.SOURCE_REMOVE
 
     def _status_text(self):
         profile, width, height = self._profile()
@@ -253,8 +283,13 @@ class StreamTx:
             return "\n".join(rows)
         if not self.overlay_enabled:
             return ""
+        receiver_status = (
+            f"Streaming to {len(self.stream_clients)} RX"
+            if self.stream_clients
+            else "Available · waiting for RX"
+        )
         return (f"TX · {profile}\n{width}x{height} · {FIXED_FPS} fps · "
-                f"Mirror {mirror} · Rotate {rotation}\nSending")
+                f"Mirror {mirror} · Rotate {rotation}\n{receiver_status}")
 
     def _refresh_status_overlay(self):
         text = self._status_text()
@@ -373,12 +408,6 @@ class StreamTx:
 
 
 def main():
-    if not CONFIG["rx_host"]:
-        raise SystemExit(
-            "Fill in CONFIG['rx_host'] in camera_tx.py first - the IP address "
-            "gar-stream-rx (Lyra Plus) is reachable at."
-        )
-
     Gst.init(None)
 
     display = None
@@ -399,6 +428,18 @@ def main():
     tx = StreamTx(CONFIG, display=display)
     tx.start()
 
+    advertiser = SourceAdvertiser(
+        CONFIG["source_id"],
+        CONFIG["source_name"],
+        control_port=CONFIG["discovery_port"],
+        on_clients_changed=lambda clients: GLib.idle_add(tx.set_stream_clients, clients),
+    )
+    advertiser.start()
+    print(
+        f"[stream_tx] advertising {CONFIG['source_name']} ({CONFIG['source_id']}) "
+        f"on UDP {advertiser.control_port}"
+    )
+
     encoder = KY040(
         CONFIG["enc_clk_gpio"], CONFIG["enc_dt_gpio"], CONFIG["enc_sw_gpio"],
         on_rotate=lambda direction, counter: tx.rotate_control(direction),
@@ -413,6 +454,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        advertiser.stop()
         encoder.stop()
         tx.stop()
         if display is not None:

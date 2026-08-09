@@ -3,7 +3,8 @@
 Copied from gar-stream-rx (board-agnostic - only used here for gar-stream-tx's
 optional local preview branch). No framebuffer/fbtft kernel driver needed -
 this talks to the panel directly over /dev/spidevX.Y and toggles DC/RESET
-through sysfs GPIO (periphery.GPIO).
+through periphery.GPIO. GAR_GPIO_CHIP selects the Linux GPIO character device;
+the legacy sysfs API is used only when that variable is intentionally omitted.
 
 Only a write-only subset is implemented (enough to blit RGB565 frames),
 since that's all a live-preview appsink callback needs.

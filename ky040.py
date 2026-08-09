@@ -7,9 +7,9 @@ changed, compare against DT" quadrature approach as most KY-040 tutorials
 small time-based debounce to filter contact bounce.
 
 Note: most KY-040 breakout boards don't have onboard pull-ups/downs on
-CLK/DT/SW, and periphery's sysfs-based GPIO API doesn't expose per-pin bias
-configuration. If the encoder is jittery, add 10k pull-up resistors to 3.3V
-on CLK/DT/SW (see README).
+CLK/DT/SW. If the encoder is jittery, add 10k pull-up resistors to 3.3V on
+CLK/DT/SW (see README). GAR_GPIO_CHIP selects the Linux GPIO character device;
+omitting it retains compatibility with the legacy sysfs backend.
 """
 import os
 import threading
