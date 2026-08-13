@@ -53,6 +53,22 @@ class QuadratureDecoder:
         self._accumulator = 0
         return direction or None
 
+    def update_phase(self, phase: str, level: bool) -> int | None:
+        """Apply one GPIO edge without losing the other phase's state.
+
+        Character-device GPIO events carry the new level of exactly one line.
+        Updating the state from that event preserves every legal transition in
+        a detent, even when several edges are queued before the reader runs.
+        """
+
+        clock = bool(self._state & 0b10)
+        data = bool(self._state & 0b01)
+        if phase == "clock":
+            return self.update(level, data)
+        if phase == "data":
+            return self.update(clock, level)
+        raise ValueError(f"unknown quadrature phase: {phase}")
+
     @staticmethod
     def _phase_state(clock: bool, data: bool) -> int:
         return (0b10 if clock else 0) | (0b01 if data else 0)

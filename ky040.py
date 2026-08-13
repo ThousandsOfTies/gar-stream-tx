@@ -36,8 +36,8 @@ def _open_gpio(line, direction):
     return gpio
 
 
-def _read_edge(gpio):
-    """Consume a pending GPIO event and return its level when available.
+def _read_event(gpio):
+    """Consume a pending GPIO event and return ``(level, timestamp_ns)``.
 
     python-periphery's character-device backend requires ``read_event()``
     after ``poll()``.  The legacy sysfs backend has no such method, and its
@@ -47,7 +47,14 @@ def _read_edge(gpio):
         event = gpio.read_event()
     except NotImplementedError:
         return None
-    return event.edge == "rising"
+    return event.edge == "rising", event.timestamp
+
+
+def _read_edge(gpio):
+    """Compatibility wrapper for the push-button reader."""
+
+    event = _read_event(gpio)
+    return None if event is None else event[0]
 
 
 class KY040:
@@ -96,21 +103,31 @@ class KY040:
         while self._running:
             clock_ready = self.clk.poll(0.1)
             data_ready = self.dt.poll(0)
+            events = []
             if clock_ready:
-                _read_edge(self.clk)
+                event = _read_event(self.clk)
+                if event is not None:
+                    events.append((event[1], "clock", event[0]))
             if data_ready:
-                _read_edge(self.dt)
+                event = _read_event(self.dt)
+                if event is not None:
+                    events.append((event[1], "data", event[0]))
             if not clock_ready and not data_ready:
                 continue
-            # An edge may already have arrived on the other phase by the time
-            # this thread runs. Decode one fresh two-line snapshot instead
-            # of combining a new phase with a stale value from a prior event.
-            clock_state = self.clk.read()
-            data_state = self.dt.read()
-            self._emit_detent(decoder, clock_state, data_state)
+            if not events:
+                # The legacy sysfs backend has no event payload, so retain
+                # its snapshot based behaviour as a compatibility fallback.
+                self._emit_detent(decoder, self.clk.read(), self.dt.read())
+                continue
+            # One event can be queued on each line. Their kernel timestamps,
+            # not poll order, define the actual Gray-code transition order.
+            for _, phase, level in sorted(events):
+                self._emit_direction(decoder.update_phase(phase, level))
 
     def _emit_detent(self, decoder, clock_state, data_state):
-        direction = decoder.update(clock_state, data_state)
+        self._emit_direction(decoder.update(clock_state, data_state))
+
+    def _emit_direction(self, direction):
         if direction is None:
             return
         # The prior TX falling-edge implementation reported the opposite sign

@@ -13,7 +13,7 @@ class QuadratureDecoderTest(unittest.TestCase):
         )
 
         self.assertIn('gpio.bias = "pull_up"', reader)
-        self.assertIn("fresh two-line snapshot", reader)
+        self.assertIn("Their kernel timestamps", reader)
 
     def test_each_complete_direction_emits_exactly_one_step(self) -> None:
         clockwise = QuadratureDecoder(True, True)
@@ -53,6 +53,18 @@ class QuadratureDecoderTest(unittest.TestCase):
         decoder = QuadratureDecoder(True, True)
         self.assertIsNone(decoder.update(False, False))
         self.assertIsNone(decoder.update(True, True))
+
+    def test_individual_gpio_events_keep_all_four_transitions(self) -> None:
+        decoder = QuadratureDecoder(True, True)
+        self.assertEqual(
+            [None, None, None, 1],
+            [
+                decoder.update_phase("clock", False),
+                decoder.update_phase("data", False),
+                decoder.update_phase("clock", True),
+                decoder.update_phase("data", True),
+            ],
+        )
 
 
 if __name__ == "__main__":
