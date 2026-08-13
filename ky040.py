@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """KY-040 rotary encoder + push-button reader using periphery.GPIO edge events.
 
 Copied from gar-stream-rx (same board-agnostic driver - only the GPIO pin

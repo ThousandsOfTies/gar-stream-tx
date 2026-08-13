@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """gar-stream-tx: OV3660 USB UVC camera -> MJPEG/RTP/UDP.
 
 The KY-040 controls the same on-screen menu on a physical TX device and in

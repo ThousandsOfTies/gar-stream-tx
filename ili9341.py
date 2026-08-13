@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Minimal ILI9341 SPI driver for Linux (spidev + periphery GPIO).
 
 Copied from gar-stream-rx (board-agnostic - only used here for gar-stream-tx's
