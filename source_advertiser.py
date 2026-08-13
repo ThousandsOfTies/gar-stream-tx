@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
 import socket
 import threading
 import time
-from typing import Callable, Iterable
-
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 
 PROTOCOL = "gar-stream/1"
 DEFAULT_DISCOVERY_PORT = 5601
@@ -224,7 +223,7 @@ class SourceAdvertiser:
             self._expire_clients()
             try:
                 payload, address = self._socket.recvfrom(MAX_PACKET_SIZE)
-            except socket.timeout:
+            except TimeoutError:
                 continue
             except OSError:
                 break

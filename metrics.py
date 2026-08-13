@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 import tempfile
-from typing import Mapping
+from collections.abc import Mapping
+from pathlib import Path
 
 
 def measured_fps(frame_count: int, first_frame_ns: int, last_frame_ns: int) -> float:

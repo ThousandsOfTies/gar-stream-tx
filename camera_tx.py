@@ -43,14 +43,14 @@ import time
 import gi
 
 gi.require_version("Gst", "1.0")
-from gi.repository import Gst, GLib  # noqa: E402
+from gi.repository import GLib, Gst
 
-from ky040 import KY040  # noqa: E402
-from source_advertiser import (  # noqa: E402
+from ky040 import KY040
+from metrics import MetricsWriter, measured_fps
+from source_advertiser import (
     DEFAULT_DISCOVERY_PORT,
     SourceAdvertiser,
 )
-from metrics import MetricsWriter, measured_fps  # noqa: E402
 
 
 def _optional_env_int(name):
@@ -498,8 +498,8 @@ def main():
         missing = [k for k in ("dc_gpio", "rst_gpio") if CONFIG[k] is None]
         if missing:
             raise SystemExit(
-                "Fill in CONFIG%s for the local ILI9341 preview, or set "
-                "CONFIG['local_display'] = False." % missing
+                f"Fill in CONFIG{missing} for the local ILI9341 preview, or set "
+                "CONFIG['local_display'] = False."
             )
         from ili9341 import ILI9341  # local import: spidev only needed for this path
 
