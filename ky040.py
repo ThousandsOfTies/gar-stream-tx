@@ -169,9 +169,6 @@ class KY040:
     def _emit_direction(self, direction):
         if direction is None:
             return
-        # The prior TX falling-edge implementation reported the opposite sign
-        # to the shared decoder. Preserve the established physical direction.
-        direction = -direction
         self.counter += direction
         if self.debug:
             print(
