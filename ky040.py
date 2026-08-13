@@ -104,28 +104,57 @@ class KY040:
         clock_state = self.clk.read()
         data_state = self.dt.read()
         decoder = QuadratureDecoder(clock_state, data_state)
+        pending_events = []
+        # gpio-cdev2 timestamps on the Pi are CLOCK_REALTIME.  Holding events
+        # for this short interval lets a queued edge on the other phase arrive
+        # before the Gray-code decoder sees either one.
+        reorder_window_ns = 5_000_000
         while self._running:
             clock_ready = self.clk.poll(0.1)
             data_ready = self.dt.poll(0)
             events = []
+            legacy_ready = False
             if clock_ready:
                 event = _read_event(self.clk)
                 if event is not None:
                     events.append((event[1], "clock", event[0]))
+                else:
+                    legacy_ready = True
             if data_ready:
                 event = _read_event(self.dt)
                 if event is not None:
                     events.append((event[1], "data", event[0]))
-            if not clock_ready and not data_ready:
-                continue
-            if not events:
+                else:
+                    legacy_ready = True
+            # Drain both character-device queues into one ordered buffer. The
+            # previous reader consumed only one edge per loop, so a data edge
+            # could be decoded after a newer clock edge from the other queue.
+            for _ in range(128):
+                queued = False
+                for phase, gpio in (("clock", self.clk), ("data", self.dt)):
+                    if not gpio.poll(0):
+                        continue
+                    event = _read_event(gpio)
+                    if event is None:
+                        legacy_ready = True
+                        continue
+                    events.append((event[1], phase, event[0]))
+                    queued = True
+                if not queued:
+                    break
+            if legacy_ready:
                 # The legacy sysfs backend has no event payload, so retain
                 # its snapshot based behaviour as a compatibility fallback.
                 self._emit_detent(decoder, self.clk.read(), self.dt.read())
                 continue
-            # One event can be queued on each line. Their kernel timestamps,
-            # not poll order, define the actual Gray-code transition order.
-            for timestamp_ns, phase, level in sorted(events):
+            pending_events.extend(events)
+            cutoff_ns = time.time_ns() - reorder_window_ns
+            ready_events = [event for event in pending_events if event[0] <= cutoff_ns]
+            pending_events = [event for event in pending_events if event[0] > cutoff_ns]
+            # Kernel timestamps, not poll order, define the actual Gray-code
+            # transition order. The small buffer also covers the race where a
+            # second GPIO queue becomes readable immediately after poll().
+            for timestamp_ns, phase, level in sorted(ready_events):
                 if self.debug:
                     print(
                         f"[ky040] edge phase={phase} level={int(level)} "

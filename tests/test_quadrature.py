@@ -13,7 +13,7 @@ class QuadratureDecoderTest(unittest.TestCase):
         )
 
         self.assertIn('gpio.bias = "pull_up"', reader)
-        self.assertIn("Their kernel timestamps", reader)
+        self.assertIn("reorder_window_ns", reader)
 
     def test_each_complete_direction_emits_exactly_one_step(self) -> None:
         clockwise = QuadratureDecoder(True, True)
