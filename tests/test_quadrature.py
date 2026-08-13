@@ -1,11 +1,20 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
 from quadrature import QuadratureDecoder
 
 
 class QuadratureDecoderTest(unittest.TestCase):
+    def test_physical_reader_requests_pull_up_for_all_encoder_inputs(self) -> None:
+        reader = (Path(__file__).resolve().parents[1] / "ky040.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('gpio.bias = "pull_up"', reader)
+        self.assertIn("fresh two-line snapshot", reader)
+
     def test_each_complete_direction_emits_exactly_one_step(self) -> None:
         clockwise = QuadratureDecoder(True, True)
         self.assertEqual(

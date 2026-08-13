@@ -10,6 +10,7 @@ CLK/DT/SW (see README). GAR_GPIO_CHIP selects the Linux GPIO character device;
 omitting it retains compatibility with the legacy sysfs backend.
 """
 import os
+import sys
 import threading
 import time
 
@@ -20,7 +21,19 @@ from quadrature import QuadratureDecoder
 
 def _open_gpio(line, direction):
     chip = os.environ.get("GAR_GPIO_CHIP")
-    return GPIO(chip, line, direction) if chip else GPIO(line, direction)
+    gpio = GPIO(chip, line, direction) if chip else GPIO(line, direction)
+    if direction == "in":
+        try:
+            # KY-040 contacts close to ground.  The Raspberry Pi 5 must
+            # therefore bias CLK/DT/SW high while they are idle; otherwise
+            # the unused inputs float and make false Gray-code transitions.
+            gpio.bias = "pull_up"
+        except (NotImplementedError, OSError) as error:
+            # The legacy sysfs backend has no bias control.  Keep it usable
+            # with external pull-ups, but never conceal that protection is
+            # unavailable on this backend.
+            print(f"[ky040] cannot enable GPIO{line} pull-up: {error}", file=sys.stderr)
+    return gpio
 
 
 def _read_edge(gpio):
@@ -86,13 +99,15 @@ class KY040:
             if not clock_ready and not data_ready:
                 continue
             if clock_ready:
-                event_level = _read_edge(self.clk)
-                clock_state = self.clk.read() if event_level is None else event_level
-                self._emit_detent(decoder, clock_state, data_state)
+                _read_edge(self.clk)
             if data_ready:
-                event_level = _read_edge(self.dt)
-                data_state = self.dt.read() if event_level is None else event_level
-                self._emit_detent(decoder, clock_state, data_state)
+                _read_edge(self.dt)
+            # An edge may already have arrived on the other phase by the time
+            # this thread runs.  Decode one fresh two-line snapshot instead
+            # of combining a new phase with a stale value from a prior event.
+            clock_state = self.clk.read()
+            data_state = self.dt.read()
+            self._emit_detent(decoder, clock_state, data_state)
 
     def _emit_detent(self, decoder, clock_state, data_state):
         direction = decoder.update(clock_state, data_state)
