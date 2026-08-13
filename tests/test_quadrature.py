@@ -13,9 +13,7 @@ class QuadratureDecoderTest(unittest.TestCase):
         )
 
         self.assertIn('gpio.bias = "pull_up"', reader)
-        self.assertIn("Decode one coherent phase state", reader)
-        self.assertIn("Decode a snapshot only after this quiet period", reader)
-        self.assertIn("def _drain_edges", reader)
+        self.assertIn("fresh two-line snapshot", reader)
 
     def test_each_complete_direction_emits_exactly_one_step(self) -> None:
         clockwise = QuadratureDecoder(True, True)

@@ -52,7 +52,7 @@ def _read_edge(gpio):
 
 class KY040:
     def __init__(self, clk_gpio, dt_gpio, sw_gpio,
-                 on_rotate=None, on_press=None, bounce_ms=3, press_debounce_ms=30):
+                 on_rotate=None, on_press=None, bounce_ms=2, press_debounce_ms=30):
         self.clk = _open_gpio(clk_gpio, "in")
         self.dt = _open_gpio(dt_gpio, "in")
         self.sw = _open_gpio(sw_gpio, "in")
@@ -62,8 +62,9 @@ class KY040:
 
         self.on_rotate = on_rotate
         self.on_press = on_press
-        # The encoder's contacts can produce several GPIO events within a
-        # millisecond.  Decode a snapshot only after this quiet period.
+        # Retain the public argument for product configuration compatibility.
+        # Gray-code transition accumulation, rather than a timing threshold,
+        # rejects rotary contact bounce without dropping a fast valid detent.
         self.bounce_s = bounce_ms / 1000.0
         self.press_debounce_s = press_debounce_ms / 1000.0
 
@@ -89,38 +90,24 @@ class KY040:
         self.sw.close()
 
     def _rotate_loop(self):
-        decoder = QuadratureDecoder(self.clk.read(), self.dt.read())
-        pending = False
-        last_edge_at = 0.0
+        clock_state = self.clk.read()
+        data_state = self.dt.read()
+        decoder = QuadratureDecoder(clock_state, data_state)
         while self._running:
-            timeout = 0.1
-            if pending:
-                timeout = max(0.0, self.bounce_s - (time.monotonic() - last_edge_at))
-            clock_ready = self.clk.poll(timeout)
+            clock_ready = self.clk.poll(0.1)
             data_ready = self.dt.poll(0)
             if clock_ready:
-                self._drain_edges(self.clk)
+                _read_edge(self.clk)
             if data_ready:
-                self._drain_edges(self.dt)
-            if clock_ready or data_ready:
-                pending = True
-                last_edge_at = time.monotonic()
+                _read_edge(self.dt)
+            if not clock_ready and not data_ready:
                 continue
-            if not pending:
-                continue
-            # The contact is now stable.  Decode one coherent phase state;
-            # never combine a fresh edge with a stale value from the other
-            # line or feed intermediate bounce states to the Gray decoder.
-            pending = False
+            # An edge may already have arrived on the other phase by the time
+            # this thread runs. Decode one fresh two-line snapshot instead
+            # of combining a new phase with a stale value from a prior event.
             clock_state = self.clk.read()
             data_state = self.dt.read()
             self._emit_detent(decoder, clock_state, data_state)
-
-    @staticmethod
-    def _drain_edges(gpio):
-        _read_edge(gpio)
-        while gpio.poll(0):
-            _read_edge(gpio)
 
     def _emit_detent(self, decoder, clock_state, data_state):
         direction = decoder.update(clock_state, data_state)
