@@ -9,6 +9,10 @@ from source_advertiser import PROTOCOL, SourceAdvertiser
 
 
 class SourceAdvertiserTest(unittest.TestCase):
+    def test_rejects_non_ascii_protocol_identity(self) -> None:
+        with self.assertRaises(ValueError):
+            SourceAdvertiser("tx-\N{SNOWMAN}", "Kitchen TX", control_port=0)
+
     def test_query_and_receiver_lease(self) -> None:
         changed = threading.Event()
         snapshots = []
@@ -39,6 +43,7 @@ class SourceAdvertiserTest(unittest.TestCase):
             self.assertEqual("source_announce", announcement["type"])
             self.assertEqual("tx-one", announcement["source_id"])
             self.assertEqual("Kitchen TX", announcement["source_name"])
+            self.assertGreaterEqual(advertiser.diagnostics()["announce_count"], 1)
 
             request = {
                 "protocol": PROTOCOL,
@@ -48,12 +53,17 @@ class SourceAdvertiserTest(unittest.TestCase):
                 "stream_port": 6200,
                 "lease_seconds": 5,
             }
-            client.sendto(json.dumps(request).encode(), ("127.0.0.1", advertiser.control_port))
+            client.sendto(
+                json.dumps(request).encode(), ("127.0.0.1", advertiser.control_port)
+            )
             self.assertTrue(changed.wait(2))
             self.assertEqual(1, len(snapshots[-1]))
             self.assertEqual("rx-one", snapshots[-1][0].receiver_id)
             self.assertEqual("127.0.0.1", snapshots[-1][0].host)
             self.assertEqual(6200, snapshots[-1][0].port)
+            diagnostics = advertiser.diagnostics()
+            self.assertEqual(1, diagnostics["lease_count"])
+            self.assertEqual("rx-one", diagnostics["leases"][0]["receiver_id"])
 
             # A stop packet only owns the lease created from the same host.
             # The protocol never accepts a destination IP from JSON, and it
@@ -74,7 +84,9 @@ class SourceAdvertiserTest(unittest.TestCase):
 
             changed.clear()
             request["type"] = "stream_stop"
-            client.sendto(json.dumps(request).encode(), ("127.0.0.1", advertiser.control_port))
+            client.sendto(
+                json.dumps(request).encode(), ("127.0.0.1", advertiser.control_port)
+            )
             self.assertTrue(changed.wait(2))
             self.assertEqual((), snapshots[-1])
         finally:

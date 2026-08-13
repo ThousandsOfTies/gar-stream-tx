@@ -34,9 +34,11 @@ Requires PyGObject + the GStreamer 1.0 typelib (system packages, not pip -
 see README.md "Dependencies"). Uses the same ili9341.py/ky040.py as
 gar-stream-rx.
 """
+
 import os
 import socket
 import sys
+import time
 
 import gi
 
@@ -48,6 +50,7 @@ from source_advertiser import (  # noqa: E402
     DEFAULT_DISCOVERY_PORT,
     SourceAdvertiser,
 )
+from metrics import MetricsWriter, measured_fps  # noqa: E402
 
 
 def _optional_env_int(name):
@@ -73,9 +76,10 @@ CONFIG = {
     "camera_io_mode": os.environ.get("GAR_CAMERA_IO_MODE", "auto"),
     "source_id": os.environ.get("GAR_STREAM_SOURCE_ID", f"{socket.gethostname()}-tx"),
     "source_name": os.environ.get("GAR_STREAM_SOURCE_NAME", socket.gethostname()),
-    "discovery_port": int(os.environ.get("GAR_STREAM_DISCOVERY_PORT", str(DEFAULT_DISCOVERY_PORT))),
+    "discovery_port": int(
+        os.environ.get("GAR_STREAM_DISCOVERY_PORT", str(DEFAULT_DISCOVERY_PORT))
+    ),
     "jpeg_quality": 85,
-
     # Optional local preview: an ILI9341 wired directly to this Pi 5 over
     # SPI (same driver/wiring as gar-stream-rx). Leave False if you don't
     # have a panel attached to the TX board.
@@ -116,7 +120,7 @@ PREVIEW_WIDTH, PREVIEW_HEIGHT = 320, 240
 def _build_pipeline_string(config, with_preview):
     network_branch = (
         "t. ! queue max-size-buffers=2 leaky=downstream "
-        "! videoscale ! videorate "
+        "! videoscale ! videorate name=rate_limiter "
         "! capsfilter name=out_caps "
         "! videoflip name=rotate_transform method=none "
         "! videoflip name=mirror_transform method=none "
@@ -130,20 +134,19 @@ def _build_pipeline_string(config, with_preview):
             "t. ! queue max-size-buffers=2 leaky=downstream "
             "! videoflip name=preview_rotate_transform method=none "
             "! videoflip name=preview_mirror_transform method=none "
-            "! textoverlay name=preview_status_overlay text=\"\" valignment=top "
+            '! textoverlay name=preview_status_overlay text="" valignment=top '
             "halignment=left shaded-background=true "
             "! videoconvert ! videoscale "
             f"! video/x-raw,format=RGB16,width={PREVIEW_WIDTH},height={PREVIEW_HEIGHT} "
             "! appsink name=preview_sink emit-signals=true sync=false max-buffers=1 drop=true"
-    )
+        )
     capture_caps = config["camera_caps"]
     decoder = "! jpegdec " if capture_caps.startswith("image/jpeg") else ""
     return (
         f"v4l2src name=camera_source device={config['camera_device']} io-mode={config['camera_io_mode']} "
         f"! {capture_caps},width={config['native_width']},height={config['native_height']},"
         f"framerate={config['native_fps']}/1 "
-        f"{decoder}! videoconvert ! tee name=t "
-        + " ".join(branches)
+        f"{decoder}! videoconvert ! tee name=t " + " ".join(branches)
     )
 
 
@@ -165,6 +168,11 @@ class StreamTx:
         self.stream_clients = ()
         self.captured_first_frame = False
         self.encoded_first_frame = False
+        self.sent_frame_count = 0
+        self.first_sent_monotonic_ns = 0
+        self.last_sent_monotonic_ns = 0
+        self.encoder_rotate_count = 0
+        self.encoder_press_count = 0
         self.pipeline = None
         self.out_caps = None
         self.rotate_transform = None
@@ -172,12 +180,16 @@ class StreamTx:
         self.preview_rotate_transform = None
         self.preview_mirror_transform = None
         self.preview_status_overlay = None
+        self.rate_limiter = None
 
         self._create_pipeline()
 
     def _create_pipeline(self):
-        self.pipeline = Gst.parse_launch(_build_pipeline_string(self.config, self.display is not None))
+        self.pipeline = Gst.parse_launch(
+            _build_pipeline_string(self.config, self.display is not None)
+        )
         self.out_caps = self.pipeline.get_by_name("out_caps")
+        self.rate_limiter = self.pipeline.get_by_name("rate_limiter")
         self.rotate_transform = self.pipeline.get_by_name("rotate_transform")
         self.mirror_transform = self.pipeline.get_by_name("mirror_transform")
         camera_source = self.pipeline.get_by_name("camera_source")
@@ -196,9 +208,15 @@ class StreamTx:
         )
 
         if self.display is not None:
-            self.preview_rotate_transform = self.pipeline.get_by_name("preview_rotate_transform")
-            self.preview_mirror_transform = self.pipeline.get_by_name("preview_mirror_transform")
-            self.preview_status_overlay = self.pipeline.get_by_name("preview_status_overlay")
+            self.preview_rotate_transform = self.pipeline.get_by_name(
+                "preview_rotate_transform"
+            )
+            self.preview_mirror_transform = self.pipeline.get_by_name(
+                "preview_mirror_transform"
+            )
+            self.preview_status_overlay = self.pipeline.get_by_name(
+                "preview_status_overlay"
+            )
             sink = self.pipeline.get_by_name("preview_sink")
             sink.connect("new-sample", self._on_new_sample)
 
@@ -219,6 +237,13 @@ class StreamTx:
         if not self.encoded_first_frame:
             self.encoded_first_frame = True
             print("[stream_tx] first JPEG frame encoded")
+        # This probe is one JPEG frame (unlike rtpjpegpay's packet probe).
+        # Count it only while a receiver lease has made the UDP sink active.
+        if self.stream_clients:
+            self.sent_frame_count += 1
+            self.last_sent_monotonic_ns = time.monotonic_ns()
+            if not self.first_sent_monotonic_ns:
+                self.first_sent_monotonic_ns = self.last_sent_monotonic_ns
         return Gst.PadProbeReturn.OK
 
     def _on_rtp_packet(self, _pad, _info):
@@ -233,12 +258,19 @@ class StreamTx:
     def _apply_output_caps(self):
         _name, width, height = self._profile()
         self.out_caps.set_property(
-            "caps", Gst.Caps.from_string(
-                f"video/x-raw,width={width},height={height},framerate={FIXED_FPS}/1"))
-        print(f"[stream_tx] profile {self._profile()[0]}: {width}x{height}@{FIXED_FPS}fps")
+            "caps",
+            Gst.Caps.from_string(
+                f"video/x-raw,width={width},height={height},framerate={FIXED_FPS}/1"
+            ),
+        )
+        print(
+            f"[stream_tx] profile {self._profile()[0]}: {width}x{height}@{FIXED_FPS}fps"
+        )
 
     def _apply_stream_clients(self):
-        clients = ",".join(f"{client.host}:{client.port}" for client in self.stream_clients)
+        clients = ",".join(
+            f"{client.host}:{client.port}" for client in self.stream_clients
+        )
         self.stream_sink.set_property("clients", clients)
 
     def set_stream_clients(self, clients):
@@ -249,7 +281,9 @@ class StreamTx:
         self.stream_clients = clients
         self.sent_first_packet = False
         self._apply_stream_clients()
-        destinations = ", ".join(f"{client.receiver_id}@{client.host}:{client.port}" for client in clients)
+        destinations = ", ".join(
+            f"{client.receiver_id}@{client.host}:{client.port}" for client in clients
+        )
         print(f"[stream_tx] receivers: {destinations or 'none'}")
         self._refresh_status_overlay()
         return GLib.SOURCE_REMOVE
@@ -288,28 +322,36 @@ class StreamTx:
             if self.stream_clients
             else "Available · waiting for RX"
         )
-        return (f"TX · {profile}\n{width}x{height} · {FIXED_FPS} fps · "
-                f"Mirror {mirror} · Rotate {rotation}\n{receiver_status}")
+        return (
+            f"TX · {profile}\n{width}x{height} · {FIXED_FPS} fps · "
+            f"Mirror {mirror} · Rotate {rotation}\n{receiver_status}"
+        )
 
     def _refresh_status_overlay(self):
         text = self._status_text()
         if self.preview_status_overlay is not None:
             # Keep normal status unobtrusive, but make menu text readable on
             # any camera image. RX follows the same menu-background rule.
-            self.preview_status_overlay.set_property("shaded-background", self.menu_open)
+            self.preview_status_overlay.set_property(
+                "shaded-background", self.menu_open
+            )
             self.preview_status_overlay.set_property("text", text)
 
     def _apply_video_options(self):
         self._apply_output_caps()
         self.rotate_transform.set_property(
-            "method", ROTATION_METHODS[self.rotation_index][1])
+            "method", ROTATION_METHODS[self.rotation_index][1]
+        )
         self.mirror_transform.set_property(
-            "method", "horizontal-flip" if self.mirror else "none")
+            "method", "horizontal-flip" if self.mirror else "none"
+        )
         if self.preview_rotate_transform is not None:
             self.preview_rotate_transform.set_property(
-                "method", ROTATION_METHODS[self.rotation_index][1])
+                "method", ROTATION_METHODS[self.rotation_index][1]
+            )
             self.preview_mirror_transform.set_property(
-                "method", "horizontal-flip" if self.mirror else "none")
+                "method", "horizontal-flip" if self.mirror else "none"
+            )
         self._refresh_status_overlay()
 
     def _on_new_sample(self, sink):
@@ -376,18 +418,21 @@ class StreamTx:
 
     def rotate_control(self, direction):
         """Handle a physical encoder turn using the menu's current state."""
+        self.encoder_rotate_count += 1
         if not self.menu_open:
             return
         step = 1 if direction >= 0 else -1
         if self.submenu_index is None:
             self.menu_index = (self.menu_index + step) % len(MAIN_MENU_ITEMS)
         else:
-            self.submenu_index = (
-                self.submenu_index + step) % len(self._submenu_values())
+            self.submenu_index = (self.submenu_index + step) % len(
+                self._submenu_values()
+            )
         self._refresh_status_overlay()
 
     def press_control(self):
         """Open the menu, select an item, then confirm its submenu value."""
+        self.encoder_press_count += 1
         if not self.menu_open:
             self.menu_open = True
             self.menu_index = 0
@@ -406,6 +451,44 @@ class StreamTx:
     def stop(self):
         self.pipeline.set_state(Gst.State.NULL)
 
+    def diagnostics(self):
+        item = MAIN_MENU_ITEMS[self.menu_index] if self.menu_open else None
+        frame_rate = measured_fps(
+            self.sent_frame_count,
+            self.first_sent_monotonic_ns,
+            self.last_sent_monotonic_ns,
+        )
+        drop_count = int(self.rate_limiter.get_property("drop"))
+        latency_ms = self._pipeline_latency_ms()
+        return {
+            "frames": {
+                "sent_count": self.sent_frame_count,
+                "last_sent_monotonic_ns": self.last_sent_monotonic_ns or None,
+                "fps": frame_rate,
+                "configured_fps": FIXED_FPS,
+                "drop_count": drop_count,
+                "latency_ms": latency_ms,
+            },
+            "menu": {
+                "open": self.menu_open,
+                "item": item,
+                "submenu_open": self.submenu_index is not None,
+            },
+            "encoder": {
+                "rotate_count": self.encoder_rotate_count,
+                "press_count": self.encoder_press_count,
+            },
+        }
+
+    def _pipeline_latency_ms(self):
+        query = Gst.Query.new_latency()
+        if not self.pipeline.query(query):
+            return None
+        _live, minimum, _maximum = query.parse_latency()
+        if minimum == Gst.CLOCK_TIME_NONE:
+            return None
+        return minimum / Gst.MSECOND
+
 
 def main():
     Gst.init(None)
@@ -419,10 +502,15 @@ def main():
                 "CONFIG['local_display'] = False." % missing
             )
         from ili9341 import ILI9341  # local import: spidev only needed for this path
+
         display = ILI9341(
-            CONFIG["spi_bus"], CONFIG["spi_device"],
-            CONFIG["dc_gpio"], CONFIG["rst_gpio"],
-            spi_max_hz=CONFIG["spi_max_hz"], rotation=1, bgr=True,
+            CONFIG["spi_bus"],
+            CONFIG["spi_device"],
+            CONFIG["dc_gpio"],
+            CONFIG["rst_gpio"],
+            spi_max_hz=CONFIG["spi_max_hz"],
+            rotation=1,
+            bgr=True,
         )
 
     tx = StreamTx(CONFIG, display=display)
@@ -432,16 +520,39 @@ def main():
         CONFIG["source_id"],
         CONFIG["source_name"],
         control_port=CONFIG["discovery_port"],
-        on_clients_changed=lambda clients: GLib.idle_add(tx.set_stream_clients, clients),
+        on_clients_changed=lambda clients: GLib.idle_add(
+            tx.set_stream_clients, clients
+        ),
     )
     advertiser.start()
+    metrics = MetricsWriter()
+
+    def publish_metrics():
+        payload = {
+            "schema_version": 1,
+            "role": "tx",
+            "health": {"ok": True},
+            "build": {
+                "id": os.environ.get("GAR_ARTIFACT_BUILD_ID"),
+                "hash": os.environ.get("GAR_ARTIFACT_HASH"),
+            },
+            "source": advertiser.diagnostics(),
+            **tx.diagnostics(),
+        }
+        metrics.write(payload)
+        return GLib.SOURCE_CONTINUE
+
+    publish_metrics()
+    GLib.timeout_add(1000, publish_metrics)
     print(
         f"[stream_tx] advertising {CONFIG['source_name']} ({CONFIG['source_id']}) "
         f"on UDP {advertiser.control_port}"
     )
 
     encoder = KY040(
-        CONFIG["enc_clk_gpio"], CONFIG["enc_dt_gpio"], CONFIG["enc_sw_gpio"],
+        CONFIG["enc_clk_gpio"],
+        CONFIG["enc_dt_gpio"],
+        CONFIG["enc_sw_gpio"],
         on_rotate=lambda direction, counter: tx.rotate_control(direction),
         on_press=tx.press_control,
     )

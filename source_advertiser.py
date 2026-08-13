@@ -32,7 +32,7 @@ def _safe_identifier(value: object, *, maximum: int = 96) -> str | None:
     value = value.strip()
     if not value or len(value) > maximum:
         return None
-    if any(ord(character) < 32 for character in value):
+    if any(not 0x20 <= ord(character) <= 0x7E for character in value):
         return None
     return value
 
@@ -64,7 +64,9 @@ class SourceAdvertiser:
         checked_id = _safe_identifier(source_id)
         checked_name = _safe_identifier(source_name)
         if checked_id is None or checked_name is None:
-            raise ValueError("source_id and source_name must be printable non-empty strings")
+            raise ValueError(
+                "source_id and source_name must be printable non-empty ASCII strings"
+            )
         if not 0 <= control_port <= 65535:
             raise ValueError("control_port must be in the range 0..65535")
 
@@ -77,6 +79,8 @@ class SourceAdvertiser:
         self._lock = threading.Lock()
         self._clients: dict[str, tuple[StreamClient, float]] = {}
         self._last_notified: tuple[StreamClient, ...] = ()
+        self._announcement_count = 0
+        self._last_announcement_monotonic_ns = 0
 
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -100,6 +104,25 @@ class SourceAdvertiser:
         with self._lock:
             return tuple(sorted(entry[0] for entry in self._clients.values()))
 
+    def diagnostics(self) -> dict[str, object]:
+        """Return connection-neutral discovery and lease observation."""
+        now = time.monotonic()
+        with self._lock:
+            leases = [
+                {
+                    "receiver_id": client.receiver_id,
+                    "stream_port": client.port,
+                    "remaining_ms": max(0, int((expires - now) * 1000)),
+                }
+                for client, expires in sorted(self._clients.values())
+            ]
+            return {
+                "announce_count": self._announcement_count,
+                "last_announce_monotonic_ns": self._last_announcement_monotonic_ns,
+                "lease_count": len(leases),
+                "leases": leases,
+            }
+
     def start(self) -> None:
         self._thread.start()
 
@@ -120,10 +143,15 @@ class SourceAdvertiser:
             "payload": 26,
             "lease_seconds": self.default_lease_seconds,
         }
-        return json.dumps(message, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+        return json.dumps(message, separators=(",", ":"), ensure_ascii=True).encode(
+            "ascii"
+        )
 
     def _send_announcement(self, targets: Iterable[tuple[str, int]]) -> None:
         payload = self._announcement()
+        with self._lock:
+            self._announcement_count += 1
+            self._last_announcement_monotonic_ns = time.monotonic_ns()
         for target in targets:
             try:
                 self._socket.sendto(payload, target)
@@ -150,13 +178,17 @@ class SourceAdvertiser:
 
         try:
             stream_port = int(message["stream_port"])
-            lease_seconds = float(message.get("lease_seconds", self.default_lease_seconds))
+            lease_seconds = float(
+                message.get("lease_seconds", self.default_lease_seconds)
+            )
         except (KeyError, TypeError, ValueError):
             return
         if not 1 <= stream_port <= 65535:
             return
         lease_seconds = min(30.0, max(1.0, lease_seconds))
-        client = StreamClient(receiver_id=receiver_id, host=address[0], port=stream_port)
+        client = StreamClient(
+            receiver_id=receiver_id, host=address[0], port=stream_port
+        )
         with self._lock:
             self._clients[receiver_id] = (client, time.monotonic() + lease_seconds)
         self._notify_if_changed()
@@ -164,7 +196,11 @@ class SourceAdvertiser:
     def _expire_clients(self) -> None:
         now = time.monotonic()
         with self._lock:
-            expired = [key for key, (_client, expires) in self._clients.items() if expires <= now]
+            expired = [
+                key
+                for key, (_client, expires) in self._clients.items()
+                if expires <= now
+            ]
             for key in expired:
                 self._clients.pop(key, None)
         if expired:
