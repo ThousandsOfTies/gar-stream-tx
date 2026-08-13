@@ -74,6 +74,10 @@ class KY040:
         # rejects rotary contact bounce without dropping a fast valid detent.
         self.bounce_s = bounce_ms / 1000.0
         self.press_debounce_s = press_debounce_ms / 1000.0
+        # Keep physical-input evidence in the service journal during the
+        # current hardware-in-the-loop investigation. Set GAR_ROTARY_DEBUG=0
+        # to silence it after the encoder has been qualified.
+        self.debug = os.environ.get("GAR_ROTARY_DEBUG", "1") != "0"
 
         self.counter = 0
         self._running = False
@@ -121,7 +125,13 @@ class KY040:
                 continue
             # One event can be queued on each line. Their kernel timestamps,
             # not poll order, define the actual Gray-code transition order.
-            for _, phase, level in sorted(events):
+            for timestamp_ns, phase, level in sorted(events):
+                if self.debug:
+                    print(
+                        f"[ky040] edge phase={phase} level={int(level)} "
+                        f"ts_ns={timestamp_ns}",
+                        flush=True,
+                    )
                 self._emit_direction(decoder.update_phase(phase, level))
 
     def _emit_detent(self, decoder, clock_state, data_state):
@@ -134,6 +144,11 @@ class KY040:
         # to the shared decoder. Preserve the established physical direction.
         direction = -direction
         self.counter += direction
+        if self.debug:
+            print(
+                f"[ky040] detent direction={direction} counter={self.counter}",
+                flush=True,
+            )
         if self.on_rotate:
             self.on_rotate(direction, self.counter)
 

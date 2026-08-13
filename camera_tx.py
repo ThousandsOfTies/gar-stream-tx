@@ -434,7 +434,13 @@ class StreamTx:
     def rotate_control(self, direction):
         """Handle a physical encoder turn using the menu's current state."""
         self.encoder_rotate_count += 1
+        before = (self.menu_open, self.menu_index, self.submenu_index)
         if not self.menu_open:
+            print(
+                f"[stream_tx] encoder direction={direction} ignored menu_closed "
+                f"rotate_count={self.encoder_rotate_count}",
+                flush=True,
+            )
             return
         step = 1 if direction >= 0 else -1
         if self.submenu_index is None:
@@ -444,6 +450,12 @@ class StreamTx:
                 self._submenu_values()
             )
         self._refresh_status_overlay()
+        print(
+            f"[stream_tx] encoder direction={direction} cursor "
+            f"before={before} after={(self.menu_open, self.menu_index, self.submenu_index)} "
+            f"rotate_count={self.encoder_rotate_count}",
+            flush=True,
+        )
 
     def press_control(self):
         """Open the menu, select an item, then confirm its submenu value."""
