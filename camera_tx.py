@@ -75,6 +75,10 @@ CONFIG = {
     "native_fps": int(os.environ.get("GAR_CAMERA_FPS", "30")),
     "camera_caps": os.environ.get("GAR_CAMERA_CAPS", "image/jpeg"),
     "camera_io_mode": os.environ.get("GAR_CAMERA_IO_MODE", "auto"),
+    # A deterministic source lets the headless GAR simulation exercise the
+    # complete RTP path without requiring a browser to feed v4l2loopback.
+    # Physical deployments retain the UVC camera path by default.
+    "camera_test_pattern": os.environ.get("GAR_CAMERA_TEST_PATTERN", "0") == "1",
     "source_id": os.environ.get("GAR_STREAM_SOURCE_ID", f"{socket.gethostname()}-tx"),
     "source_name": os.environ.get("GAR_STREAM_SOURCE_NAME", socket.gethostname()),
     "discovery_port": int(
@@ -141,14 +145,21 @@ def _build_pipeline_string(config, with_preview):
             f"! video/x-raw,format=RGB16,width={PREVIEW_WIDTH},height={PREVIEW_HEIGHT} "
             "! appsink name=preview_sink emit-signals=true sync=false max-buffers=1 drop=true"
         )
-    capture_caps = config["camera_caps"]
-    decoder = "! jpegdec " if capture_caps.startswith("image/jpeg") else ""
-    return (
-        f"v4l2src name=camera_source device={config['camera_device']} io-mode={config['camera_io_mode']} "
-        f"! {capture_caps},width={config['native_width']},height={config['native_height']},"
-        f"framerate={config['native_fps']}/1 "
-        f"{decoder}! videoconvert ! tee name=t " + " ".join(branches)
-    )
+    if config["camera_test_pattern"]:
+        source = (
+            "videotestsrc name=camera_source is-live=true pattern=ball "
+            f"! video/x-raw,width={config['native_width']},height={config['native_height']},"
+            f"framerate={config['native_fps']}/1 "
+        )
+    else:
+        capture_caps = config["camera_caps"]
+        decoder = "! jpegdec " if capture_caps.startswith("image/jpeg") else ""
+        source = (
+            f"v4l2src name=camera_source device={config['camera_device']} io-mode={config['camera_io_mode']} "
+            f"! {capture_caps},width={config['native_width']},height={config['native_height']},"
+            f"framerate={config['native_fps']}/1 {decoder}"
+        )
+    return source + "! videoconvert ! tee name=t " + " ".join(branches)
 
 
 class StreamTx:
