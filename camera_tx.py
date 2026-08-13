@@ -129,6 +129,9 @@ def _build_pipeline_string(config, with_preview):
         "! capsfilter name=out_caps "
         "! videoflip name=rotate_transform method=none "
         "! videoflip name=mirror_transform method=none "
+        # rtpjpegpay accepts the baseline JPEG YUV layouts, but not the
+        # Y444 output selected by videotestsrc on the headless simulator.
+        "! videoconvert ! video/x-raw,format=I420 "
         f"! jpegenc name=jpeg_encoder quality={config['jpeg_quality']} "
         "! rtpjpegpay name=rtp_pay "
         "! multiudpsink name=stream_sink sync=false async=false"
