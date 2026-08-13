@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 """KY-040 rotary encoder + push-button reader using periphery.GPIO edge events.
 
-Copied from gar-stream-rx (same board-agnostic driver - only the GPIO pin
-numbers passed in differ between projects). Uses the same simple "CLK
-changed, compare against DT" quadrature approach as most KY-040 tutorials
-(not a full Gray-code state machine) - good enough for a casual demo, with a
-small time-based debounce to filter contact bounce.
+The decoder consumes both phases as a four-transition Gray-code cycle.  This
+emits exactly one menu step per completed detent and rejects contact bounce.
 
 Note: most KY-040 breakout boards don't have onboard pull-ups/downs on
 CLK/DT/SW. If the encoder is jittery, add 10k pull-up resistors to 3.3V on
@@ -17,6 +14,8 @@ import threading
 import time
 
 from periphery import GPIO
+
+from quadrature import QuadratureDecoder
 
 
 def _open_gpio(line, direction):
@@ -44,13 +43,15 @@ class KY040:
         self.clk = _open_gpio(clk_gpio, "in")
         self.dt = _open_gpio(dt_gpio, "in")
         self.sw = _open_gpio(sw_gpio, "in")
-        # One detent produces a rising and a falling CLK edge.  Handling only
-        # the falling edge makes one physical detent exactly one UI step.
-        self.clk.edge = "falling"
+        self.clk.edge = "both"
+        self.dt.edge = "both"
         self.sw.edge = "falling"
 
         self.on_rotate = on_rotate
         self.on_press = on_press
+        # Retain the public argument for product configuration compatibility.
+        # Gray-code transition accumulation, rather than a timing threshold,
+        # rejects rotary contact bounce without dropping a fast valid detent.
         self.bounce_s = bounce_ms / 1000.0
         self.press_debounce_s = press_debounce_ms / 1000.0
 
@@ -76,21 +77,33 @@ class KY040:
         self.sw.close()
 
     def _rotate_loop(self):
-        last_time = 0.0
+        clock_state = self.clk.read()
+        data_state = self.dt.read()
+        decoder = QuadratureDecoder(clock_state, data_state)
         while self._running:
-            if not self.clk.poll(0.5):
+            clock_ready = self.clk.poll(0.1)
+            data_ready = self.dt.poll(0.1) if not clock_ready else self.dt.poll(0)
+            if not clock_ready and not data_ready:
                 continue
-            event_level = _read_edge(self.clk)
-            clk_state = self.clk.read() if event_level is None else event_level
-            now = time.monotonic()
-            if now - last_time < self.bounce_s:
-                continue
-            last_time = now
-            dt_state = self.dt.read()
-            direction = -1 if dt_state == clk_state else 1
-            self.counter += direction
-            if self.on_rotate:
-                self.on_rotate(direction, self.counter)
+            if clock_ready:
+                event_level = _read_edge(self.clk)
+                clock_state = self.clk.read() if event_level is None else event_level
+                self._emit_detent(decoder, clock_state, data_state)
+            if data_ready:
+                event_level = _read_edge(self.dt)
+                data_state = self.dt.read() if event_level is None else event_level
+                self._emit_detent(decoder, clock_state, data_state)
+
+    def _emit_detent(self, decoder, clock_state, data_state):
+        direction = decoder.update(clock_state, data_state)
+        if direction is None:
+            return
+        # The prior TX falling-edge implementation reported the opposite sign
+        # to the shared decoder. Preserve the established physical direction.
+        direction = -direction
+        self.counter += direction
+        if self.on_rotate:
+            self.on_rotate(direction, self.counter)
 
     def _button_loop(self):
         last_time = 0.0
