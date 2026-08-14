@@ -107,8 +107,9 @@ PROFILES = (
 )
 DEFAULT_PROFILE_INDEX = 1
 FIXED_FPS = 15
+JPEG_QUALITY_OPTIONS = (60, 75, 85, 95)
 
-MENU_ITEMS = ("Profile", "Mirror", "Rotate", "Overlay")
+MENU_ITEMS = ("Profile", "JPEG", "Mirror", "Rotate", "Overlay")
 MAIN_MENU_ITEMS = (*MENU_ITEMS, "EXIT")
 ROTATION_METHODS = (
     ("0°", "none"),
@@ -143,7 +144,9 @@ def _build_pipeline_string(config, with_preview):
             "! videoflip name=preview_rotate_transform method=none "
             "! videoflip name=preview_mirror_transform method=none "
             '! textoverlay name=preview_status_overlay text="" valignment=top '
-            "halignment=left shaded-background=true "
+            'halignment=left font-desc="Sans Bold 16" color=4294967295 '
+            "draw-outline=true draw-shadow=false outline-color=4278190080 "
+            "shaded-background=true shading-value=180 xpad=8 ypad=6 "
             "! videoconvert ! videoscale "
             f"! video/x-raw,format=RGB16,width={PREVIEW_WIDTH},height={PREVIEW_HEIGHT} "
             "! appsink name=preview_sink emit-signals=true sync=false max-buffers=1 drop=true"
@@ -171,6 +174,10 @@ class StreamTx:
     def __init__(self, config, profile_index=DEFAULT_PROFILE_INDEX, display=None):
         self.config = config
         self.profile_index = profile_index
+        self.jpeg_quality_index = min(
+            range(len(JPEG_QUALITY_OPTIONS)),
+            key=lambda index: abs(JPEG_QUALITY_OPTIONS[index] - config["jpeg_quality"]),
+        )
         self.mirror = False
         self.rotation_index = 0
         self.overlay_enabled = True
@@ -190,6 +197,7 @@ class StreamTx:
         self.encoder_press_count = 0
         self.pipeline = None
         self.out_caps = None
+        self.jpeg_encoder = None
         self.rotate_transform = None
         self.mirror_transform = None
         self.preview_rotate_transform = None
@@ -208,13 +216,13 @@ class StreamTx:
         self.rotate_transform = self.pipeline.get_by_name("rotate_transform")
         self.mirror_transform = self.pipeline.get_by_name("mirror_transform")
         camera_source = self.pipeline.get_by_name("camera_source")
-        jpeg_encoder = self.pipeline.get_by_name("jpeg_encoder")
+        self.jpeg_encoder = self.pipeline.get_by_name("jpeg_encoder")
         payloader = self.pipeline.get_by_name("rtp_pay")
         self.stream_sink = self.pipeline.get_by_name("stream_sink")
         camera_source.get_static_pad("src").add_probe(
             Gst.PadProbeType.BUFFER, self._on_camera_frame
         )
-        jpeg_encoder.get_static_pad("src").add_probe(
+        self.jpeg_encoder.get_static_pad("src").add_probe(
             Gst.PadProbeType.BUFFER, self._on_jpeg_frame
         )
         payloader.get_static_pad("src").add_probe(
@@ -270,6 +278,9 @@ class StreamTx:
     def _profile(self):
         return PROFILES[self.profile_index]
 
+    def _jpeg_quality(self):
+        return JPEG_QUALITY_OPTIONS[self.jpeg_quality_index]
+
     def _apply_output_caps(self):
         _name, width, height = self._profile()
         self.out_caps.set_property(
@@ -281,6 +292,10 @@ class StreamTx:
         print(
             f"[stream_tx] profile {self._profile()[0]}: {width}x{height}@{FIXED_FPS}fps"
         )
+
+    def _apply_jpeg_quality(self):
+        self.jpeg_encoder.set_property("quality", self._jpeg_quality())
+        print(f"[stream_tx] JPEG quality: {self._jpeg_quality()}")
 
     def _apply_stream_clients(self):
         clients = ",".join(
@@ -310,16 +325,18 @@ class StreamTx:
         if self.menu_open:
             if self.submenu_index is not None:
                 item = MENU_ITEMS[self.menu_index]
-                rows = [f"TX MENU > {item.upper()}"]
+                rows = [f"TX > {item.upper()}"]
                 for index, value in enumerate(self._submenu_values()):
                     marker = ">" if index == self.submenu_index else " "
                     rows.append(f"{marker} {value}")
                 return "\n".join(rows)
-            rows = ["TX MENU"]
+            rows = ["TX SETTINGS"]
             for index, item in enumerate(MAIN_MENU_ITEMS):
                 marker = ">" if index == self.menu_index else " "
                 if item == "Profile":
-                    value = profile
+                    value = profile.upper()
+                elif item == "JPEG":
+                    value = f"{self._jpeg_quality()}%"
                 elif item == "Mirror":
                     value = mirror
                 elif item == "Rotate":
@@ -328,7 +345,7 @@ class StreamTx:
                     value = "ON" if self.overlay_enabled else "OFF"
                 else:
                     value = ""
-                rows.append(f"{marker} {item}{': ' + value if value else ''}")
+                rows.append(f"{marker} {item.upper():<7}{value}".rstrip())
             return "\n".join(rows)
         if not self.overlay_enabled:
             return ""
@@ -354,6 +371,7 @@ class StreamTx:
 
     def _apply_video_options(self):
         self._apply_output_caps()
+        self._apply_jpeg_quality()
         self.rotate_transform.set_property(
             "method", ROTATION_METHODS[self.rotation_index][1]
         )
@@ -406,8 +424,10 @@ class StreamTx:
         if self.menu_index == 0:
             return tuple(profile[0] for profile in PROFILES)
         if self.menu_index == 1:
-            return ("OFF", "ON")
+            return tuple(f"{quality}%" for quality in JPEG_QUALITY_OPTIONS)
         if self.menu_index == 2:
+            return ("OFF", "ON")
+        if self.menu_index == 3:
             return tuple(rotation[0] for rotation in ROTATION_METHODS)
         return ("OFF", "ON")
 
@@ -415,8 +435,10 @@ class StreamTx:
         if self.menu_index == 0:
             return self.profile_index
         if self.menu_index == 1:
-            return int(self.mirror)
+            return self.jpeg_quality_index
         if self.menu_index == 2:
+            return int(self.mirror)
+        if self.menu_index == 3:
             return self.rotation_index
         return int(self.overlay_enabled)
 
@@ -424,8 +446,10 @@ class StreamTx:
         if self.menu_index == 0:
             self.profile_index = self.submenu_index
         elif self.menu_index == 1:
-            self.mirror = bool(self.submenu_index)
+            self.jpeg_quality_index = self.submenu_index
         elif self.menu_index == 2:
+            self.mirror = bool(self.submenu_index)
+        elif self.menu_index == 3:
             self.rotation_index = self.submenu_index
         else:
             self.overlay_enabled = bool(self.submenu_index)
