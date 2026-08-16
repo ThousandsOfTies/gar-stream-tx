@@ -144,7 +144,7 @@ def _build_pipeline_string(config, with_preview):
             "! videoflip name=preview_rotate_transform method=none "
             "! videoflip name=preview_mirror_transform method=none "
             '! textoverlay name=preview_status_overlay text="" valignment=top '
-            'halignment=left font-desc="Sans Bold 16" color=4294967295 '
+            'halignment=left font-desc="Sans 14" color=4294967295 '
             "draw-outline=true draw-shadow=false outline-color=4278190080 "
             "shaded-background=true shading-value=180 xpad=8 ypad=6 "
             "! videoconvert ! videoscale "
