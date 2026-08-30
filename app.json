@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "id": "gar-stream-tx",
+  "build": {"owner": "target-capsule"},
+  "runtime": {
+    "entrypoint": "run",
+    "install_dir": "/opt/gar/apps/gar-stream-tx"
+  }
+}
