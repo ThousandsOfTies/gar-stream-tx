@@ -60,6 +60,7 @@ def _optional_env_int(name):
 
 
 CONFIG = {
+    "enc_debounce_us": int(os.environ.get("GAR_ENC_DEBOUNCE_US", "0")),
     "enc_clk_gpio": int(os.environ.get("GAR_ENC_CLK_GPIO", "17")),
     "enc_dt_gpio": int(os.environ.get("GAR_ENC_DT_GPIO", "27")),
     "enc_sw_gpio": int(os.environ.get("GAR_ENC_SW_GPIO", "22")),
@@ -606,6 +607,7 @@ def main():
         CONFIG["enc_sw_gpio"],
         on_rotate=lambda direction, counter: tx.rotate_control(direction),
         on_press=tx.press_control,
+        debounce_us=CONFIG["enc_debounce_us"],
     )
     encoder.start()
 
