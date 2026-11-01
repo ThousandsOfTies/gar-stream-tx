@@ -1,5 +1,9 @@
 # gar-stream-tx — Raspberry Pi 5 + OV3660 USB カメラ（TX 側）
 
+Productの配線からSPI設定を渡す場合は`GAR_LCD_SPI_BUS`、`GAR_LCD_SPI_DEVICE`、
+`GAR_LCD_SPI_MAX_HZ`を使用します。未指定時は従来どおりbus 0、CS 0、24MHzです。
+Productは基板プロファイルと配線CSVを選び、このアプリへ環境変数で渡します。
+
 **目的:** [gar-stream-rx](https://github.com/ThousandsOfTies/gar-stream-rx)（Luckfox Lyra Plus のビデオ
 モニター）へ MJPEG/RTP Sourceを提供するTX側。TXはRXのaddressを保持せず、
 UDP discoveryで自己広告し、RXから送信要求が届いた間だけ要求元へ配信する。カメラは
