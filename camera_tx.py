@@ -90,9 +90,9 @@ CONFIG = {
     # SPI (same driver/wiring as gar-stream-rx). Leave False if you don't
     # have a panel attached to the TX board.
     "local_display": os.environ.get("GAR_LOCAL_DISPLAY", "0") == "1",
-    "spi_bus": 0,
-    "spi_device": 0,
-    "spi_max_hz": 24_000_000,
+    "spi_bus": int(os.environ.get("GAR_LCD_SPI_BUS", "0")),
+    "spi_device": int(os.environ.get("GAR_LCD_SPI_DEVICE", "0")),
+    "spi_max_hz": int(os.environ.get("GAR_LCD_SPI_MAX_HZ", "24000000")),
     "dc_gpio": _optional_env_int("GAR_LCD_DC_GPIO"),
     "rst_gpio": _optional_env_int("GAR_LCD_RST_GPIO"),
 }
