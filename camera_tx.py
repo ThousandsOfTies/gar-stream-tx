@@ -60,6 +60,7 @@ def _optional_env_int(name):
 
 
 CONFIG = {
+    "enc_debounce_us": int(os.environ.get("GAR_ENC_DEBOUNCE_US", "0")),
     "enc_clk_gpio": int(os.environ.get("GAR_ENC_CLK_GPIO", "17")),
     "enc_dt_gpio": int(os.environ.get("GAR_ENC_DT_GPIO", "27")),
     "enc_sw_gpio": int(os.environ.get("GAR_ENC_SW_GPIO", "22")),
@@ -89,9 +90,9 @@ CONFIG = {
     # SPI (same driver/wiring as gar-stream-rx). Leave False if you don't
     # have a panel attached to the TX board.
     "local_display": os.environ.get("GAR_LOCAL_DISPLAY", "0") == "1",
-    "spi_bus": 0,
-    "spi_device": 0,
-    "spi_max_hz": 24_000_000,
+    "spi_bus": int(os.environ.get("GAR_LCD_SPI_BUS", "0")),
+    "spi_device": int(os.environ.get("GAR_LCD_SPI_DEVICE", "0")),
+    "spi_max_hz": int(os.environ.get("GAR_LCD_SPI_MAX_HZ", "24000000")),
     "dc_gpio": _optional_env_int("GAR_LCD_DC_GPIO"),
     "rst_gpio": _optional_env_int("GAR_LCD_RST_GPIO"),
 }
@@ -606,6 +607,7 @@ def main():
         CONFIG["enc_sw_gpio"],
         on_rotate=lambda direction, counter: tx.rotate_control(direction),
         on_press=tx.press_control,
+        debounce_us=CONFIG["enc_debounce_us"],
     )
     encoder.start()
 

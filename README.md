@@ -1,5 +1,9 @@
 # gar-stream-tx — Raspberry Pi 5 + OV3660 USB カメラ（TX 側）
 
+Productの配線からSPI設定を渡す場合は`GAR_LCD_SPI_BUS`、`GAR_LCD_SPI_DEVICE`、
+`GAR_LCD_SPI_MAX_HZ`を使用します。未指定時は従来どおりbus 0、CS 0、24MHzです。
+Productは基板プロファイルと配線CSVを選び、このアプリへ環境変数で渡します。
+
 **目的:** [gar-stream-rx](https://github.com/ThousandsOfTies/gar-stream-rx)（Luckfox Lyra Plus のビデオ
 モニター）へ MJPEG/RTP Sourceを提供するTX側。TXはRXのaddressを保持せず、
 UDP discoveryで自己広告し、RXから送信要求が届いた間だけ要求元へ配信する。カメラは
@@ -286,3 +290,16 @@ python3 camera_tx.py
   の CUSE SPI スタブ（`/dev/spidev0.0` + DC ピン問い合わせ + フレームバッファを
   Virtual Hardware Panel に表示）がそのまま使える。ILI9341 のコマンド/データ
   プロトコルは gar-stream-rx と共通なので、追加のシミュレータ実装は不要。
+
+## KY-040のGPIO入力デバウンス
+
+`GAR_ENC_DEBOUNCE_US`で、CLK・DT・SWの入力フィルター要求値をマイクロ秒で指定します。
+アプリ単体の既定値は0、範囲は0〜1000000です。Productが機種ごとの初期値を明示し、
+シミュレータは0で物理タイミングの影響を避けます。
+Python版の初期化は`KY040(..., debounce_us=CONFIG["enc_debounce_us"])`です。
+非0の指定には、gar-toolsの
+`targets/linux-device/runtime/gpio-input/python/gar_gpio_debounce.py`をアプリへ同梱するか、
+そのディレクトリーを`PYTHONPATH`へ追加してください。GPIOのedge・bias設定後に
+Linux GPIO v2へ要求し、対応しないバックエンドで黙って無効化することはありません。
+カーネルがハードウェアまたはソフトウェアで処理し、実効時間はタイマー精度にも依存します。
+高速回転を含む追従性は機種ごとの実機で確認してください。

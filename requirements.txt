@@ -1,2 +1,2 @@
 spidev
-python-periphery
+python-periphery>=2.4.3

@@ -59,13 +59,24 @@ def _read_edge(gpio):
 
 class KY040:
     def __init__(self, clk_gpio, dt_gpio, sw_gpio,
-                 on_rotate=None, on_press=None, bounce_ms=2, press_debounce_ms=30):
+                 on_rotate=None, on_press=None, bounce_ms=2, press_debounce_ms=30,
+                 debounce_us=0):
         self.clk = _open_gpio(clk_gpio, "in")
         self.dt = _open_gpio(dt_gpio, "in")
         self.sw = _open_gpio(sw_gpio, "in")
         self.clk.edge = "both"
         self.dt.edge = "both"
         self.sw.edge = "falling"
+        # Product-selected input filtering is applied after periphery's edge
+        # and bias setters, which replace the kernel line configuration.
+        if debounce_us:
+            try:
+                from gar_gpio_debounce import configure_inputs
+            except ImportError as error:
+                for gpio in (self.clk, self.dt, self.sw):
+                    gpio.close()
+                raise RuntimeError("Package gar-tools gar_gpio_debounce.py beside the app for kernel debounce") from error
+            configure_inputs((self.clk, self.dt, self.sw), debounce_us)
 
         self.on_rotate = on_rotate
         self.on_press = on_press
